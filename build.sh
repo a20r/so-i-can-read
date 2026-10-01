@@ -8,7 +8,8 @@ rm -rf dist
 mkdir -p dist
 wasm-bindgen --target web --no-typescript --out-dir dist/pkg \
   target/wasm32-unknown-unknown/release/so_i_can_read.wasm
-cp web/index.html web/style.css web/icon.svg web/manifest.webmanifest dist/
+cp web/index.html web/style.css web/fonts.css web/icon.svg web/manifest.webmanifest dist/
+cp -r web/fonts dist/fonts
 touch dist/.nojekyll
 if command -v wasm-opt >/dev/null 2>&1; then
   # Rust's wasm32 target emits these post-MVP features by default.

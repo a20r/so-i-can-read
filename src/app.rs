@@ -6,7 +6,7 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use wasm_bindgen_futures::spawn_local;
+use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{
     Document, Element, Event, HtmlElement, HtmlInputElement, HtmlSelectElement, HtmlTextAreaElement,
     KeyboardEvent, Storage, UrlSearchParams, Window,
@@ -26,6 +26,8 @@ const START_DELAY_MS: f64 = 400.0;
 /// Resuming backs up a few words for context, but never past the sentence start.
 const RESUME_REWIND: usize = 3;
 const RESUME_SENTENCE_WINDOW: usize = 8;
+/// How long to wait for the word font before the first flash.
+const FONT_WAIT_MS: i32 = 1000;
 /// Largest document we keep in localStorage for "Continue last".
 const MAX_SAVED_BYTES: usize = 400_000;
 
@@ -47,6 +49,7 @@ struct Els {
     font_size: HtmlInputElement,
     font_val: HtmlElement,
     theme: HtmlSelectElement,
+    word_font: HtmlSelectElement,
     guides: HtmlInputElement,
     orp: HtmlInputElement,
     proxy: HtmlInputElement,
@@ -101,6 +104,8 @@ struct App {
     elapsed_ms: f64,
     /// Words shown while playing (skipping ahead does not count).
     words_read: usize,
+    /// Title from a `?title=` link, applied to the next document.
+    title_override: Option<String>,
 }
 
 pub fn run() -> Result<(), JsValue> {
@@ -127,6 +132,7 @@ pub fn run() -> Result<(), JsValue> {
         loading: false,
         elapsed_ms: 0.0,
         words_read: 0,
+        title_override: None,
     }));
 
     install_timers(&app);
@@ -165,6 +171,7 @@ impl Els {
             font_size: get(document, "font-size")?,
             font_val: get(document, "font-val")?,
             theme: get(document, "theme")?,
+            word_font: get(document, "word-font")?,
             guides: get(document, "guides")?,
             orp: get(document, "orp")?,
             proxy: get(document, "proxy")?,
@@ -267,6 +274,7 @@ impl App {
             .font_val
             .set_text_content(Some(&format!("{:.2}", s.font_size)));
         self.els.theme.set_value(&s.theme);
+        self.els.word_font.set_value(&s.word_font);
         self.els.guides.set_checked(s.show_guides);
         self.els.orp.set_checked(s.highlight_orp);
         self.els.proxy.set_value(&s.proxy);
@@ -289,6 +297,7 @@ impl App {
                 let _ = root
                     .style()
                     .set_property("--word-size", &format!("{}rem", s.font_size));
+                let _ = root.style().set_property("--word-font", s.word_font_stack());
             }
         }
         toggle_class(&self.els.stage, "guides", s.show_guides);
@@ -317,6 +326,7 @@ impl App {
         s.pause_scale = self.els.pause_scale.value().parse().unwrap_or(s.pause_scale);
         s.font_size = self.els.font_size.value().parse().unwrap_or(s.font_size);
         s.theme = self.els.theme.value();
+        s.word_font = self.els.word_font.value();
         s.show_guides = self.els.guides.checked();
         s.highlight_orp = self.els.orp.checked();
         s.proxy = self.els.proxy.value();
@@ -331,17 +341,13 @@ impl App {
 // Reader state machine
 
 impl App {
-    fn start_doc(
-        &mut self,
-        doc: Doc,
-        source_text: String,
-        source_url: Option<String>,
-        start_idx: usize,
-        autoplay: bool,
-    ) {
+    fn start_doc(&mut self, doc: Doc, source_text: String, source_url: Option<String>, start_idx: usize) {
         self.clear_timer();
         self.loading = false;
         self.doc = doc;
+        if let Some(title) = self.title_override.take() {
+            self.doc.title = Some(title);
+        }
         self.source_text = source_text;
         self.source_url = source_url;
         self.idx = start_idx.min(self.doc.tokens.len().saturating_sub(1));
@@ -360,9 +366,6 @@ impl App {
         self.els.reader.set_hidden(false);
         let _ = self.els.stage.focus();
         self.render();
-        if autoplay {
-            self.play();
-        }
     }
 
     fn go_home(&mut self) {
@@ -686,7 +689,7 @@ fn read_input(app: &Shared, raw: String, autoplay: bool) {
                 app.borrow().set_status("Nothing readable in that text.", true);
                 return;
             }
-            app.borrow_mut().start_doc(doc, text, None, 0, autoplay);
+            start_doc_gated(app, doc, text, None, 0, autoplay);
         }
         Input::Url(url) => load_url(app, url, autoplay),
     }
@@ -726,11 +729,53 @@ fn load_url(app: &Shared, url: String, autoplay: bool) {
                     }
                     _ => fetched.text,
                 };
-                a.start_doc(doc, text, Some(url), 0, autoplay);
+                drop(a);
+                start_doc_gated(&app, doc, text, Some(url), 0, autoplay);
             }
             Err(e) => a.set_status(&format!("Could not load that link: {e}"), true),
         }
     });
+}
+
+/// Show a document and, when asked, start playing once the word font is ready.
+/// A short timeout keeps an offline or blocked font from stalling Read.
+fn start_doc_gated(
+    app: &Shared,
+    doc: Doc,
+    source_text: String,
+    source_url: Option<String>,
+    start_idx: usize,
+    autoplay: bool,
+) {
+    let family = {
+        let mut a = app.borrow_mut();
+        a.start_doc(doc, source_text, source_url, start_idx);
+        a.settings.word_font_family().to_string()
+    };
+    if !autoplay {
+        return;
+    }
+    let app = app.clone();
+    spawn_local(async move {
+        let (window, document) = {
+            let a = app.borrow();
+            (a.window.clone(), a.document.clone())
+        };
+        wait_for_font(&window, &document, &family).await;
+        let mut a = app.borrow_mut();
+        if !a.els.reader.hidden() {
+            a.play();
+        }
+    });
+}
+
+async fn wait_for_font(window: &Window, document: &Document, family: &str) {
+    let load = document.fonts().load(&format!("500 48px \"{family}\""));
+    let timeout = js_sys::Promise::new(&mut |resolve, _| {
+        let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, FONT_WAIT_MS);
+    });
+    let race = js_sys::Promise::race(&js_sys::Array::of2(&load, &timeout));
+    let _ = JsFuture::from(race).await;
 }
 
 fn continue_last(app: &Shared) {
@@ -747,8 +792,7 @@ fn continue_last(app: &Shared) {
         app.borrow().set_status("Nothing to continue.", true);
         return;
     }
-    app.borrow_mut()
-        .start_doc(doc, saved.text, saved.url, saved.idx, false);
+    start_doc_gated(app, doc, saved.text, saved.url, saved.idx, false);
 }
 
 fn paste_and_read(app: &Shared) {
@@ -783,6 +827,12 @@ fn handle_query_params(app: &Shared) {
     };
     if let Some(wpm) = params.get("wpm").and_then(|w| w.parse::<u32>().ok()) {
         app.borrow_mut().set_wpm(wpm);
+    }
+    if let Some(title) = params.get("title") {
+        let title = title.trim().to_string();
+        if !title.is_empty() {
+            app.borrow_mut().title_override = Some(title);
+        }
     }
     if let Some(url) = params.get("url").or_else(|| params.get("u")) {
         app.borrow().els.input.set_value(&url);
@@ -866,10 +916,11 @@ fn wire_events(app: &Shared) {
             read_input(&app, SAMPLE.to_string(), true);
         });
     }
-    let setting_inputs: [&web_sys::EventTarget; 5] = [
+    let setting_inputs: [&web_sys::EventTarget; 6] = [
         &els.pause_scale,
         &els.font_size,
         &els.theme,
+        &els.word_font,
         &els.guides,
         &els.orp,
     ];
