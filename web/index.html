@@ -4,27 +4,43 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="dark light">
-  <meta name="theme-color" content="#111318">
+  <meta name="theme-color" content="#0a0a12">
   <meta name="description" content="Read anything one word at a time. Paste text, markdown, a Slack message, or a link.">
   <title>so i can read</title>
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="manifest" href="manifest.webmanifest">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=Inter:wght@400;500;600;700&display=swap">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <noscript>This reader needs JavaScript and WebAssembly.</noscript>
+  <div class="backdrop" aria-hidden="true"></div>
 
   <main id="home" class="view">
-    <header class="home-header">
+    <section class="hero">
+      <div class="demo" aria-hidden="true">
+        <span style="--i:0">P<b>a</b>ste</span>
+        <span style="--i:1">a<b>n</b>ything.</span>
+        <span style="--i:2">R<b>e</b>ad</span>
+        <span style="--i:3">i<b>t</b></span>
+        <span style="--i:4">o<b>n</b>e</span>
+        <span style="--i:5">w<b>o</b>rd</span>
+        <span style="--i:6">a<b>t</b></span>
+        <span style="--i:7">a</span>
+        <span style="--i:8">t<b>i</b>me.</span>
+        <span style="--i:9">F<b>a</b>st.</span>
+      </div>
       <h1>so i can read</h1>
-      <p class="tagline">Paste text, markdown, a Slack message, or a link. Read it one word at a time.</p>
-    </header>
+      <p class="tagline">Articles, markdown, that wall-of-text Slack message. One word at a time, as fast as you like.</p>
+    </section>
 
-    <section class="input-area">
+    <section class="card input-card">
       <label class="visually-hidden" for="input">Text or link to read</label>
-      <textarea id="input" rows="8" placeholder="Paste anything here, or a link…" autocapitalize="off" spellcheck="false"></textarea>
+      <textarea id="input" rows="7" placeholder="Paste text, markdown, or a link…" autocapitalize="off" spellcheck="false"></textarea>
       <div class="actions">
-        <button id="read-btn" class="primary" type="button">Read</button>
+        <button id="read-btn" class="primary" type="button">Read it</button>
         <button id="paste-btn" type="button">Paste &amp; read</button>
         <button id="continue-btn" type="button" hidden>Continue last</button>
         <button id="sample-btn" class="quiet" type="button">Try a sample</button>
@@ -32,7 +48,7 @@
       <p id="status" class="status" role="status" aria-live="polite"></p>
     </section>
 
-    <details class="settings" id="settings">
+    <details class="card settings" id="settings">
       <summary>Settings</summary>
       <div class="settings-grid">
         <label>
@@ -66,16 +82,17 @@
 
     <footer class="home-footer">
       <p>
-        Keys: <kbd>space</kbd> play/pause · <kbd>←</kbd> <kbd>→</kbd> word · <kbd>shift</kbd>+<kbd>←</kbd>/<kbd>→</kbd> sentence
+        <kbd>space</kbd> play/pause · <kbd>←</kbd> <kbd>→</kbd> word · <kbd>shift</kbd>+<kbd>←</kbd>/<kbd>→</kbd> sentence
         · <kbd>↑</kbd> <kbd>↓</kbd> speed · <kbd>esc</kbd> back
       </p>
-      <p>Tip: open <code>?url=https://…</code> or <code>?text=…</code> to read straight from a link.</p>
+      <p>Open <code>?url=https://…</code> or <code>?text=…</code> to read straight from a link. Built in Rust, runs as WebAssembly in your browser.</p>
     </footer>
   </main>
 
   <section id="reader" class="view" hidden>
+    <div class="progress-bar" aria-hidden="true"><div id="progress-fill" class="progress-fill"></div></div>
     <header class="reader-bar">
-      <button id="back-btn" type="button" aria-label="Back">✕</button>
+      <button id="back-btn" class="icon" type="button" aria-label="Back">✕</button>
       <div id="title" class="title"></div>
       <div class="meta">
         <span id="progress-text">0 / 0</span>
@@ -84,6 +101,7 @@
     </header>
 
     <div id="stage" class="stage" role="button" tabindex="0" aria-label="Tap to play or pause">
+      <div class="glow" aria-hidden="true"></div>
       <div id="word" class="word">
         <span id="word-before" class="before"></span><span id="word-pivot" class="pivot"></span><span id="word-after" class="after"></span>
       </div>
@@ -91,21 +109,21 @@
       <div id="hint" class="hint">tap to pause</div>
     </div>
 
-    <div class="controls">
-      <input id="scrub" type="range" min="0" max="0" value="0" aria-label="Position">
+    <div class="dock">
+      <input id="scrub" class="scrub" type="range" min="0" max="0" value="0" aria-label="Position">
       <div class="buttons">
-        <button id="restart-btn" type="button" aria-label="Restart">⟲</button>
-        <button id="prev-sent-btn" type="button" aria-label="Previous sentence">⏮</button>
-        <button id="prev-word-btn" type="button" aria-label="Previous word">‹</button>
-        <button id="play-btn" class="primary" type="button" aria-label="Play">▶</button>
-        <button id="next-word-btn" type="button" aria-label="Next word">›</button>
-        <button id="next-sent-btn" type="button" aria-label="Next sentence">⏭</button>
+        <button id="restart-btn" class="icon" type="button" aria-label="Restart">⟲</button>
+        <button id="prev-sent-btn" class="icon" type="button" aria-label="Previous sentence">⏮</button>
+        <button id="prev-word-btn" class="icon" type="button" aria-label="Previous word">‹</button>
+        <button id="play-btn" class="play" type="button" aria-label="Play">▶</button>
+        <button id="next-word-btn" class="icon" type="button" aria-label="Next word">›</button>
+        <button id="next-sent-btn" class="icon" type="button" aria-label="Next sentence">⏭</button>
       </div>
       <div class="speed">
-        <button id="wpm-minus" type="button" aria-label="Slower">−</button>
+        <button id="wpm-minus" class="icon small" type="button" aria-label="Slower">−</button>
         <input id="wpm" type="range" min="60" max="1500" step="10" value="300" aria-label="Words per minute">
-        <button id="wpm-plus" type="button" aria-label="Faster">+</button>
-        <span class="wpm-label"><output id="wpm-val">300</output> wpm</span>
+        <button id="wpm-plus" class="icon small" type="button" aria-label="Faster">+</button>
+        <span class="wpm-label"><output id="wpm-val">300</output><small>wpm</small></span>
       </div>
     </div>
   </section>
