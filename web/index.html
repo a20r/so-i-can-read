@@ -11,7 +11,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@300;400;500;600&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Inter:opsz,wght@14..32,300..600&display=swap">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -43,11 +43,11 @@
     <section class="frame input-area">
       <span class="label frame-label">input</span>
       <label class="visually-hidden" for="input">Text or link to read</label>
-      <textarea id="input" rows="7" placeholder="Paste text, markdown, or a link" autocapitalize="off" spellcheck="false"></textarea>
+      <textarea id="input" rows="6" placeholder="Paste text, markdown, or a link" autocapitalize="off" spellcheck="false"></textarea>
       <div class="actions">
         <button id="read-btn" class="primary" type="button">Read</button>
-        <button id="paste-btn" type="button">Paste &amp; read</button>
-        <button id="continue-btn" type="button" hidden>Continue</button>
+        <button id="paste-btn" class="quiet" type="button">Paste &amp; read</button>
+        <button id="continue-btn" class="quiet" type="button" hidden>Continue</button>
         <button id="sample-btn" class="quiet" type="button">Sample</button>
       </div>
       <p id="status" class="status" role="status" aria-live="polite"></p>
@@ -65,19 +65,21 @@
           <input id="pause-scale" type="range" min="0" max="2" step="0.1" value="1">
         </label>
         <label>
-          <span class="label">word size <output id="font-val">3.0</output></span>
+          <span class="label">word size <output id="font-val">3.00</output></span>
           <input id="font-size" type="range" min="1.5" max="6" step="0.25" value="3">
         </label>
         <label>
           <span class="label">theme</span>
-          <select id="theme">
-            <option value="auto">System</option>
-            <option value="dark">Dark</option>
-            <option value="light">Light</option>
-          </select>
+          <span class="select">
+            <select id="theme">
+              <option value="auto">System</option>
+              <option value="dark">Dark</option>
+              <option value="light">Light</option>
+            </select>
+          </span>
         </label>
-        <label class="check"><span class="label">focus guides</span><input id="guides" type="checkbox" checked></label>
-        <label class="check"><span class="label">focus letter</span><input id="orp" type="checkbox" checked></label>
+        <label class="check"><span class="label">focus guides</span><input id="guides" type="checkbox" role="switch" checked></label>
+        <label class="check"><span class="label">focus letter</span><input id="orp" type="checkbox" role="switch" checked></label>
         <label>
           <span class="label">link proxy</span>
           <input id="proxy" type="url" placeholder="https://r.jina.ai/" autocapitalize="off" spellcheck="false">
@@ -86,18 +88,18 @@
     </details>
 
     <footer class="home-footer">
-      <p class="label">
+      <p>
         <kbd>space</kbd> play <kbd>&larr;</kbd><kbd>&rarr;</kbd> word <kbd>shift</kbd>+<kbd>&larr;</kbd><kbd>&rarr;</kbd> sentence
         <kbd>&uarr;</kbd><kbd>&darr;</kbd> speed <kbd>esc</kbd> back
       </p>
-      <p class="label"><code>?url=</code> or <code>?text=</code> opens straight into the reader</p>
+      <p><code>?url=</code> or <code>?text=</code> opens straight into the reader</p>
     </footer>
   </main>
 
   <section id="reader" class="view" hidden>
     <div class="progress-bar" aria-hidden="true"><div id="progress-fill" class="progress-fill"></div></div>
     <header class="reader-bar">
-      <button id="back-btn" class="icon" type="button" aria-label="Back">&#x2715;</button>
+      <button id="back-btn" class="icon" type="button" aria-label="Back">&times;</button>
       <div id="title" class="title"></div>
       <div class="meta">
         <span id="progress-text">0 / 0</span>
@@ -116,20 +118,18 @@
     <div class="dock">
       <input id="scrub" class="scrub" type="range" min="0" max="0" value="0" aria-label="Position">
       <div class="buttons">
-        <button id="restart-btn" class="icon" type="button" aria-label="Restart">&#x21BA;</button>
-        <span class="spacer"></span>
+        <button id="restart-btn" class="icon restart" type="button" aria-label="Restart">&#x21BA;</button>
         <button id="prev-sent-btn" class="icon" type="button" aria-label="Previous sentence">&#x2039;&#x2039;</button>
         <button id="prev-word-btn" class="icon" type="button" aria-label="Previous word">&#x2039;</button>
-        <button id="play-btn" class="play" type="button" aria-label="Play">&#x25B6;</button>
+        <button id="play-btn" class="play" type="button" aria-label="Play">&#x25B6;&#xFE0E;</button>
         <button id="next-word-btn" class="icon" type="button" aria-label="Next word">&#x203A;</button>
         <button id="next-sent-btn" class="icon" type="button" aria-label="Next sentence">&#x203A;&#x203A;</button>
-        <span class="spacer"></span>
-        <span class="wpm-label"><output id="wpm-val">300</output><span class="label">wpm</span></span>
       </div>
       <div class="speed">
         <button id="wpm-minus" class="icon small" type="button" aria-label="Slower">&minus;</button>
         <input id="wpm" type="range" min="60" max="1500" step="10" value="300" aria-label="Words per minute">
         <button id="wpm-plus" class="icon small" type="button" aria-label="Faster">+</button>
+        <span class="wpm-label"><output id="wpm-val">300</output><span class="label">wpm</span></span>
       </div>
     </div>
   </section>
