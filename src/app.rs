@@ -507,10 +507,12 @@ impl App {
         self.els.word_pivot.set_text_content(Some(&split.pivot));
         self.els.word_after.set_text_content(Some(&split.after));
 
-        let before_len = split.before.chars().count();
-        let after_len = split.after.chars().count();
-        let half = before_len.max(after_len) + 1;
-        let _ = self.els.word.style().set_property("--half", &half.to_string());
+        // Glyphs on each side of the focus letter, counting half the pivot for each side.
+        let left = split.before.chars().count() + 1;
+        let right = split.after.chars().count() + 1;
+        let style = self.els.word.style();
+        let _ = style.set_property("--left", &left.to_string());
+        let _ = style.set_property("--right", &right.to_string());
 
         let cls = self.els.word.class_list();
         for c in ["style-heading", "style-strong", "style-emphasis", "style-code"] {
