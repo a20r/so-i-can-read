@@ -11,6 +11,10 @@ wasm-bindgen --target web --no-typescript --out-dir dist/pkg \
 cp web/index.html web/style.css web/icon.svg web/manifest.webmanifest dist/
 touch dist/.nojekyll
 if command -v wasm-opt >/dev/null 2>&1; then
-  wasm-opt -Os -o dist/pkg/so_i_can_read_bg.wasm dist/pkg/so_i_can_read_bg.wasm
+  # Rust's wasm32 target emits these post-MVP features by default.
+  wasm-opt -Os \
+    --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
+    --enable-mutable-globals --enable-reference-types --enable-multivalue \
+    -o dist/pkg/so_i_can_read_bg.wasm dist/pkg/so_i_can_read_bg.wasm
 fi
 ls -la dist dist/pkg
