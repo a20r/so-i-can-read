@@ -531,7 +531,12 @@ impl App {
 
         self.els
             .play_btn
-            .set_text_content(Some(if self.playing { "⏸" } else { "▶" }));
+            // U+FE0E keeps the glyphs as text so iOS does not swap in emoji.
+            .set_text_content(Some(if self.playing {
+                "\u{23F8}\u{FE0E}"
+            } else {
+                "\u{25B6}\u{FE0E}"
+            }));
         self.els
             .play_btn
             .set_attribute("aria-label", if self.playing { "Pause" } else { "Play" })
@@ -562,10 +567,13 @@ impl App {
         if total == 0 {
             return;
         }
-        self.els
-            .progress_text
-            .set_text_content(Some(&format!("{} / {}", self.idx + 1, total)));
-        let left = timing::total_ms(&self.doc.tokens[self.idx..], &self.pacing());
+        self.els.progress_text.set_text_content(Some(&format!(
+            "{:0width$} / {total}",
+            self.idx + 1,
+            width = total.to_string().len()
+        )));
+        // Time for the words after this one, so the last word reads 00:00.
+        let left = timing::total_ms(&self.doc.tokens[self.idx + 1..], &self.pacing());
         self.els
             .time_left
             .set_text_content(Some(&format!("{} left", timing::format_clock(left))));
@@ -586,22 +594,26 @@ impl App {
             } else {
                 0
             };
-            if let (Ok(done), Ok(headline)) = (
+            if let (Ok(done), Ok(headline), Ok(readout), Ok(again)) = (
                 self.document.create_element("span"),
                 self.document.create_element("strong"),
+                self.document.create_element("span"),
+                self.document.create_element("span"),
             ) {
                 done.set_class_name("done");
-                headline.set_text_content(Some("Done."));
+                headline.set_text_content(Some("Done"));
                 let _ = done.append_child(&headline);
-                let stats = if words > 0 {
-                    format!(
-                        "{words} words in {} at {wpm} wpm. Tap to read again.",
+                if words > 0 {
+                    readout.set_class_name("readout");
+                    readout.set_text_content(Some(&format!(
+                        "{words:03} words \u{00B7} {} \u{00B7} {wpm} wpm",
                         timing::format_clock(self.elapsed_ms)
-                    )
-                } else {
-                    "Tap to read again.".to_string()
-                };
-                let _ = done.append_child(&self.document.create_text_node(&stats));
+                    )));
+                    let _ = done.append_child(&readout);
+                }
+                again.set_class_name("again");
+                again.set_text_content(Some("tap to read again"));
+                let _ = done.append_child(&again);
                 let _ = ctx.append_child(&done);
             }
             return;
