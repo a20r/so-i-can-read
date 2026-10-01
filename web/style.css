@@ -14,7 +14,9 @@
   --track-1: 0.06em;
   --track-2: 0.12em;
   --track-3: 0.2em;
-  --word-size: 3rem;
+  --word-size: 3.25rem;
+  /* Typeface of the flashed word; the reader overrides this from the settings. */
+  --word-font: "Atkinson Hyperlegible Next", "Inter", system-ui, sans-serif;
   /* Fixation point as a fraction of the stage width, left of centre as in Spritz. */
   --pivot: 44%;
   /* Glyph counts on each side of the focus letter, set by the reader. */
@@ -225,6 +227,8 @@ button.icon.small { width: 44px; height: 44px; font-size: 1.1rem; }
 .demo {
   position: relative;
   height: 3.6rem;
+  font-family: var(--word-font);
+  font-synthesis: none;
   font-size: clamp(2rem, 6.5vw, 2.8rem);
   font-weight: 500;
   letter-spacing: 0;
@@ -594,6 +598,9 @@ input[type="range"]:focus-visible { outline: 1px solid var(--accent); outline-of
     calc(40vw / (var(--left) * 0.62)),
     calc(52vw / (var(--right) * 0.62))
   );
+  font-family: var(--word-font);
+  /* A missing bold or italic face should show as missing, not as a sheared fake. */
+  font-synthesis: none;
   line-height: 1.2;
   font-weight: 500;
   letter-spacing: 0;
