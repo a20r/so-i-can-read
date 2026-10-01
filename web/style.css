@@ -244,18 +244,21 @@ button.icon.small { width: 44px; height: 44px; font-size: 1.1rem; }
 }
 .demo::before { top: -0.2rem; }
 .demo::after { bottom: -0.2rem; }
+/* Each word uses the reader's own split layout, so the marked letter sits under the ticks. */
 .demo span {
   position: absolute;
-  left: var(--pivot);
-  top: 0;
+  inset: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 44fr) auto minmax(0, 56fr);
   line-height: 3.6rem;
   white-space: nowrap;
   opacity: 0;
   animation: flick 4s steps(1, end) infinite;
   animation-delay: calc(var(--i) * 0.4s - 4s);
-  /* Shift so the second letter (the marked one) sits under the ticks. */
-  transform: translateX(-0.9em);
 }
+.demo span i { font-style: normal; }
+.demo span i:first-child { text-align: right; }
+.demo span i:last-child { text-align: left; }
 .demo span b { color: var(--accent); font-weight: inherit; }
 @keyframes flick {
   0%, 9.99% { opacity: 1; }
