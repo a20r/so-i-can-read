@@ -562,9 +562,11 @@ impl App {
         if total == 0 {
             return;
         }
-        self.els
-            .progress_text
-            .set_text_content(Some(&format!("{} / {}", self.idx + 1, total)));
+        self.els.progress_text.set_text_content(Some(&format!(
+            "{:0width$} / {total}",
+            self.idx + 1,
+            width = total.to_string().len()
+        )));
         let left = timing::total_ms(&self.doc.tokens[self.idx..], &self.pacing());
         self.els
             .time_left

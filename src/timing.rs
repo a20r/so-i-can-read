@@ -112,7 +112,7 @@ pub fn format_clock(ms: f64) -> String {
     if h > 0 {
         format!("{h}:{m:02}:{s:02}")
     } else {
-        format!("{m}:{s:02}")
+        format!("{m:02}:{s:02}")
     }
 }
 
@@ -174,8 +174,8 @@ mod tests {
 
     #[test]
     fn clock_format() {
-        assert_eq!(format_clock(0.0), "0:00");
-        assert_eq!(format_clock(61_000.0), "1:01");
+        assert_eq!(format_clock(0.0), "00:00");
+        assert_eq!(format_clock(61_000.0), "01:01");
         assert_eq!(format_clock(3_600_000.0 + 5_000.0), "1:00:05");
     }
 }
