@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#111318">
+  <meta name="description" content="Read anything one word at a time. Paste text, markdown, a Slack message, or a link.">
+  <title>so i can read</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <noscript>This reader needs JavaScript and WebAssembly.</noscript>
+
+  <main id="home" class="view">
+    <header class="home-header">
+      <h1>so i can read</h1>
+      <p class="tagline">Paste text, markdown, a Slack message, or a link. Read it one word at a time.</p>
+    </header>
+
+    <section class="input-area">
+      <label class="visually-hidden" for="input">Text or link to read</label>
+      <textarea id="input" rows="8" placeholder="Paste anything here, or a link…" autocapitalize="off" spellcheck="false"></textarea>
+      <div class="actions">
+        <button id="read-btn" class="primary" type="button">Read</button>
+        <button id="paste-btn" type="button">Paste &amp; read</button>
+        <button id="continue-btn" type="button" hidden>Continue last</button>
+        <button id="sample-btn" class="quiet" type="button">Try a sample</button>
+      </div>
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+    </section>
+
+    <details class="settings" id="settings">
+      <summary>Settings</summary>
+      <div class="settings-grid">
+        <label>
+          <span>Speed <output id="wpm-home-val">300</output> wpm</span>
+          <input id="wpm-home" type="range" min="60" max="1500" step="10" value="300">
+        </label>
+        <label>
+          <span>Pauses at punctuation <output id="pause-val">1.0</output>×</span>
+          <input id="pause-scale" type="range" min="0" max="2" step="0.1" value="1">
+        </label>
+        <label>
+          <span>Word size <output id="font-val">3.0</output></span>
+          <input id="font-size" type="range" min="1.5" max="6" step="0.25" value="3">
+        </label>
+        <label>
+          <span>Theme</span>
+          <select id="theme">
+            <option value="auto">System</option>
+            <option value="dark">Dark</option>
+            <option value="light">Light</option>
+          </select>
+        </label>
+        <label class="check"><input id="guides" type="checkbox" checked> <span>Show focus guides</span></label>
+        <label class="check"><input id="orp" type="checkbox" checked> <span>Highlight the focus letter</span></label>
+        <label>
+          <span>Link reader proxy (used when a site blocks direct loading)</span>
+          <input id="proxy" type="url" placeholder="https://r.jina.ai/" autocapitalize="off" spellcheck="false">
+        </label>
+      </div>
+    </details>
+
+    <footer class="home-footer">
+      <p>
+        Keys: <kbd>space</kbd> play/pause · <kbd>←</kbd> <kbd>→</kbd> word · <kbd>shift</kbd>+<kbd>←</kbd>/<kbd>→</kbd> sentence
+        · <kbd>↑</kbd> <kbd>↓</kbd> speed · <kbd>esc</kbd> back
+      </p>
+      <p>Tip: open <code>?url=https://…</code> or <code>?text=…</code> to read straight from a link.</p>
+    </footer>
+  </main>
+
+  <section id="reader" class="view" hidden>
+    <header class="reader-bar">
+      <button id="back-btn" type="button" aria-label="Back">✕</button>
+      <div id="title" class="title"></div>
+      <div class="meta">
+        <span id="progress-text">0 / 0</span>
+        <span id="time-left">0:00</span>
+      </div>
+    </header>
+
+    <div id="stage" class="stage" role="button" tabindex="0" aria-label="Tap to play or pause">
+      <div id="word" class="word">
+        <span id="word-before" class="before"></span><span id="word-pivot" class="pivot"></span><span id="word-after" class="after"></span>
+      </div>
+      <div id="context" class="context" aria-live="off"></div>
+      <div id="hint" class="hint">tap to pause</div>
+    </div>
+
+    <div class="controls">
+      <input id="scrub" type="range" min="0" max="0" value="0" aria-label="Position">
+      <div class="buttons">
+        <button id="restart-btn" type="button" aria-label="Restart">⟲</button>
+        <button id="prev-sent-btn" type="button" aria-label="Previous sentence">⏮</button>
+        <button id="prev-word-btn" type="button" aria-label="Previous word">‹</button>
+        <button id="play-btn" class="primary" type="button" aria-label="Play">▶</button>
+        <button id="next-word-btn" type="button" aria-label="Next word">›</button>
+        <button id="next-sent-btn" type="button" aria-label="Next sentence">⏭</button>
+      </div>
+      <div class="speed">
+        <button id="wpm-minus" type="button" aria-label="Slower">−</button>
+        <input id="wpm" type="range" min="60" max="1500" step="10" value="300" aria-label="Words per minute">
+        <button id="wpm-plus" type="button" aria-label="Faster">+</button>
+        <span class="wpm-label"><output id="wpm-val">300</output> wpm</span>
+      </div>
+    </div>
+  </section>
+
+  <script type="module">
+    import init from "./pkg/so_i_can_read.js";
+    init().catch((e) => {
+      const s = document.getElementById("status");
+      if (s) s.textContent = "Failed to load the reader: " + e;
+      console.error(e);
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+{
+  "name": "so i can read",
+  "short_name": "read",
+  "description": "Read anything one word at a time.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#111318",
+  "theme_color": "#111318",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
