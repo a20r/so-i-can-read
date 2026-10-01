@@ -97,6 +97,10 @@ struct App {
     source_text: String,
     source_url: Option<String>,
     loading: bool,
+    /// Milliseconds of words shown while playing, for the finish stats.
+    elapsed_ms: f64,
+    /// Words shown while playing (skipping ahead does not count).
+    words_read: usize,
 }
 
 pub fn run() -> Result<(), JsValue> {
@@ -121,6 +125,8 @@ pub fn run() -> Result<(), JsValue> {
         source_text: String::new(),
         source_url: None,
         loading: false,
+        elapsed_ms: 0.0,
+        words_read: 0,
     }));
 
     install_timers(&app);
@@ -264,6 +270,14 @@ impl App {
         self.els.guides.set_checked(s.show_guides);
         self.els.orp.set_checked(s.highlight_orp);
         self.els.proxy.set_value(&s.proxy);
+        for r in [
+            &self.els.wpm_home,
+            &self.els.wpm,
+            &self.els.pause_scale,
+            &self.els.font_size,
+        ] {
+            set_range_fill(r);
+        }
 
         if let Some(root) = self.document.document_element() {
             if s.theme == "auto" {
@@ -291,6 +305,8 @@ impl App {
         self.els.wpm.set_value(&wpm.to_string());
         self.els.wpm_home_val.set_text_content(Some(&wpm.to_string()));
         self.els.wpm_val.set_text_content(Some(&wpm.to_string()));
+        set_range_fill(&self.els.wpm_home);
+        set_range_fill(&self.els.wpm);
         self.save_settings();
         self.render_meta();
     }
@@ -331,6 +347,8 @@ impl App {
         self.idx = start_idx.min(self.doc.tokens.len().saturating_sub(1));
         self.playing = false;
         self.finished = false;
+        self.elapsed_ms = 0.0;
+        self.words_read = 0;
         self.set_status("", false);
 
         let title = self.doc.title.clone().unwrap_or_default();
@@ -362,6 +380,8 @@ impl App {
         if self.finished {
             self.finished = false;
             self.idx = 0;
+            self.elapsed_ms = 0.0;
+            self.words_read = 0;
         } else if self.idx > 0 {
             let sentence_start = self.doc.sentence_start(self.idx);
             self.idx = if self.idx - sentence_start <= RESUME_SENTENCE_WINDOW {
@@ -371,6 +391,7 @@ impl App {
             };
         }
         self.playing = true;
+        self.words_read += 1;
         self.render();
         self.show_hint();
         let ms = START_DELAY_MS + self.current_duration();
@@ -408,6 +429,7 @@ impl App {
             return;
         }
         self.idx += 1;
+        self.words_read += 1;
         self.render();
         let ms = self.current_duration();
         self.schedule(ms);
@@ -437,6 +459,7 @@ impl App {
 
     fn schedule(&mut self, ms: f64) {
         self.clear_timer();
+        self.elapsed_ms += ms;
         if let Some(tick) = &self.tick {
             self.timer = self
                 .window
@@ -513,6 +536,17 @@ impl App {
             .ok();
         toggle_class(&self.els.stage, "paused", !self.playing);
         self.els.scrub.set_value(&self.idx.to_string());
+        set_range_fill(&self.els.scrub);
+        let progress = if self.doc.tokens.len() > 1 {
+            self.idx as f64 / (self.doc.tokens.len() - 1) as f64
+        } else {
+            1.0
+        };
+        let _ = self
+            .els
+            .reader
+            .style()
+            .set_property("--progress", &format!("{progress:.4}"));
         self.render_meta();
         if self.playing {
             self.els.context.set_text_content(None);
@@ -543,9 +577,29 @@ impl App {
             return;
         }
         if self.finished {
-            if let Ok(done) = self.document.create_element("span") {
+            let words = self.words_read;
+            let minutes = self.elapsed_ms / 60_000.0;
+            let wpm = if minutes > 0.0 {
+                (words as f64 / minutes).round() as u32
+            } else {
+                0
+            };
+            if let (Ok(done), Ok(headline)) = (
+                self.document.create_element("span"),
+                self.document.create_element("strong"),
+            ) {
                 done.set_class_name("done");
-                done.set_text_content(Some("Done. Tap to read again."));
+                headline.set_text_content(Some("Done."));
+                let _ = done.append_child(&headline);
+                let stats = if words > 0 {
+                    format!(
+                        "{words} words in {} at {wpm} wpm. Tap to read again.",
+                        timing::format_clock(self.elapsed_ms)
+                    )
+                } else {
+                    "Tap to read again.".to_string()
+                };
+                let _ = done.append_child(&self.document.create_text_node(&stats));
                 let _ = ctx.append_child(&done);
             }
             return;
@@ -581,6 +635,19 @@ impl App {
         self.els.status.set_text_content(Some(msg));
         toggle_class(&self.els.status, "error", is_error);
     }
+}
+
+/// Expose a range input's position as `--pct` so CSS can paint the filled track.
+fn set_range_fill(input: &HtmlInputElement) {
+    let value: f64 = input.value().parse().unwrap_or(0.0);
+    let min: f64 = input.min().parse().unwrap_or(0.0);
+    let max: f64 = input.max().parse().unwrap_or(1.0);
+    let pct = if max > min {
+        ((value - min) / (max - min) * 100.0).clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+    let _ = input.style().set_property("--pct", &format!("{pct:.2}%"));
 }
 
 fn toggle_class(el: &Element, class: &str, on: bool) {
