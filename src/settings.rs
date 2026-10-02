@@ -20,6 +20,8 @@ pub struct Settings {
     pub proxy: String,
     /// Typeface for the flashed word: one of `WORD_FONTS`.
     pub word_font: String,
+    /// Study mode: hold at every sentence end until the reader taps.
+    pub study_mode: bool,
 }
 
 /// (setting key, CSS family stack, family name to wait for before the first flash)
@@ -49,6 +51,7 @@ impl Default for Settings {
             highlight_orp: true,
             proxy: DEFAULT_PROXY.into(),
             word_font: WORD_FONTS[0].0.into(),
+            study_mode: false,
         }
     }
 }

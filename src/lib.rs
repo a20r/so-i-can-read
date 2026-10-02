@@ -4,6 +4,7 @@
 //! browser dependency and are unit tested natively. `app` is the wasm front end.
 
 pub mod input;
+pub mod resume;
 pub mod settings;
 pub mod slack;
 pub mod text;

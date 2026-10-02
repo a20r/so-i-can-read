@@ -72,12 +72,21 @@ impl Default for Pacing {
     }
 }
 
-/// Milliseconds the token should remain on screen.
-pub fn duration_ms(token: &Token, pacing: &Pacing) -> f64 {
-    let base = 60_000.0 / pacing.wpm.max(1) as f64;
+/// Minimum pause after a boundary, in milliseconds at pause strength 1. Readers need time at
+/// the end of a sentence to put it together, and that need does not shrink with speed.
+const CLAUSE_FLOOR_MS: f64 = 150.0;
+const SENTENCE_FLOOR_MS: f64 = 500.0;
+const LINE_FLOOR_MS: f64 = 300.0;
+const PARAGRAPH_FLOOR_MS: f64 = 900.0;
+
+fn base_ms(pacing: &Pacing) -> f64 {
+    60_000.0 / pacing.wpm.max(1) as f64
+}
+
+/// Milliseconds to read the word itself, before any boundary pause.
+pub fn word_ms(token: &Token, pacing: &Pacing) -> f64 {
     let len = token.len() as f64;
     let mut mult = 1.0;
-
     if len > 6.0 {
         mult += 0.035 * (len - 6.0).min(10.0) * pacing.length_scale;
     }
@@ -87,17 +96,29 @@ pub fn duration_ms(token: &Token, pacing: &Pacing) -> f64 {
     if token.style == Style::Code {
         mult += 0.25 * pacing.length_scale;
     }
-    let pause = match token.boundary {
-        Boundary::None => 0.0,
-        Boundary::Clause => 0.6,
-        Boundary::Sentence => 1.4,
-        Boundary::Paragraph => 2.2,
+    base_ms(pacing) * mult
+}
+
+/// Milliseconds of pause after the word: proportional to the word time, with a floor.
+pub fn hold_ms(token: &Token, pacing: &Pacing) -> f64 {
+    let base = base_ms(pacing);
+    let (k, floor) = match token.boundary {
+        Boundary::None => (0.0, 0.0),
+        Boundary::Clause => (0.6, CLAUSE_FLOOR_MS),
+        Boundary::Sentence => (1.4, SENTENCE_FLOOR_MS),
+        Boundary::Line => (1.4, LINE_FLOOR_MS),
+        Boundary::Paragraph => (2.2, PARAGRAPH_FLOOR_MS),
     };
-    mult += pause * pacing.pause_scale;
+    let mut hold = (k * base).max(floor);
     if token.style == Style::Heading {
-        mult += 0.5 * pacing.pause_scale;
+        hold += 0.5 * base;
     }
-    base * mult
+    hold * pacing.pause_scale
+}
+
+/// Milliseconds the token should remain on screen.
+pub fn duration_ms(token: &Token, pacing: &Pacing) -> f64 {
+    word_ms(token, pacing) + hold_ms(token, pacing)
 }
 
 /// Total reading time for a slice of tokens, in milliseconds.
@@ -159,6 +180,26 @@ mod tests {
         let para = duration_ms(&tok("word.", Boundary::Paragraph), &p);
         assert!((plain - 200.0).abs() < 1e-9);
         assert!(plain < clause && clause < sentence && sentence < para);
+    }
+
+    #[test]
+    fn sentence_pause_has_a_floor_at_any_speed() {
+        for wpm in [300, 600, 1500] {
+            let p = Pacing {
+                wpm,
+                ..Pacing::default()
+            };
+            assert!(
+                hold_ms(&tok("word.", Boundary::Sentence), &p) >= 500.0,
+                "{wpm} wpm"
+            );
+            assert!(hold_ms(&tok("word", Boundary::Line), &p) >= 300.0, "{wpm} wpm");
+        }
+        let slow = Pacing {
+            wpm: 100,
+            ..Pacing::default()
+        };
+        assert_eq!(hold_ms(&tok("word.", Boundary::Sentence), &slow), 840.0);
     }
 
     #[test]
