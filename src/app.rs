@@ -47,6 +47,7 @@ struct Els {
     paste_btn: HtmlElement,
     continue_btn: HtmlElement,
     sample_btn: HtmlElement,
+    clear_btn: HtmlElement,
     status: HtmlElement,
     wpm_home: HtmlInputElement,
     wpm_home_val: HtmlElement,
@@ -200,6 +201,7 @@ impl Els {
             paste_btn: get(document, "paste-btn")?,
             continue_btn: get(document, "continue-btn")?,
             sample_btn: get(document, "sample-btn")?,
+            clear_btn: get(document, "clear-btn")?,
             status: get(document, "status")?,
             wpm_home: get(document, "wpm-home")?,
             wpm_home_val: get(document, "wpm-home-val")?,
@@ -1112,6 +1114,15 @@ fn wire_events(app: &Shared) {
         on(&els.sample_btn, "click", move |_| {
             app.borrow().els.input.set_value(SAMPLE);
             read_input(&app, SAMPLE.to_string(), true);
+        });
+    }
+    {
+        let app = app.clone();
+        on(&els.clear_btn, "click", move |_| {
+            let a = app.borrow();
+            a.els.input.set_value("");
+            a.set_status("", false);
+            let _ = a.els.input.focus();
         });
     }
     let setting_inputs: [&web_sys::EventTarget; 7] = [

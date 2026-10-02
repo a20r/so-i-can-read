@@ -321,6 +321,8 @@ textarea#input:focus { outline: none; border-bottom-color: var(--accent); }
 
 .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
 .actions .primary { min-width: 7rem; }
+/* Clear only shows when there is something to clear. */
+.input-area:has(textarea:placeholder-shown) #clear-btn { display: none; }
 
 .status:empty { display: none; }
 .status {
