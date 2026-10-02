@@ -24,7 +24,9 @@ pub enum Boundary {
     Clause,
     /// End of a sentence.
     Sentence,
-    /// End of a paragraph, heading, list item or block.
+    /// End of a list item, table row or similar short block.
+    Line,
+    /// End of a paragraph, heading, list or block.
     Paragraph,
 }
 
@@ -87,6 +89,25 @@ impl Document {
         } else {
             self.sentence_start(start - 1)
         }
+    }
+
+    /// Index of the first token of the clause containing `idx`, never before its sentence.
+    pub fn clause_start(&self, idx: usize) -> usize {
+        self.block_start(idx, Boundary::Clause)
+    }
+
+    /// Index of the first token of the paragraph containing `idx`.
+    pub fn paragraph_start(&self, idx: usize) -> usize {
+        self.block_start(idx, Boundary::Paragraph)
+    }
+
+    fn block_start(&self, idx: usize, level: Boundary) -> usize {
+        let idx = idx.min(self.tokens.len().saturating_sub(1));
+        let mut i = idx;
+        while i > 0 && self.tokens[i - 1].boundary < level {
+            i -= 1;
+        }
+        i
     }
 
     pub fn word_count(&self) -> usize {
@@ -189,16 +210,15 @@ fn markdown_segments(input: &str) -> (Option<String>, Vec<Segment>) {
                     style_stack.pop();
                     segments.push(Segment::Break(Boundary::Paragraph));
                 }
-                TagEnd::Paragraph
-                | TagEnd::Item
-                | TagEnd::BlockQuote(_)
+                TagEnd::Paragraph | TagEnd::BlockQuote(_) | TagEnd::List(_) | TagEnd::FootnoteDefinition => {
+                    segments.push(Segment::Break(Boundary::Paragraph));
+                }
+                TagEnd::Item
                 | TagEnd::TableRow
                 | TagEnd::TableHead
-                | TagEnd::List(_)
-                | TagEnd::FootnoteDefinition
                 | TagEnd::DefinitionListDefinition
                 | TagEnd::DefinitionListTitle => {
-                    segments.push(Segment::Break(Boundary::Paragraph));
+                    segments.push(Segment::Break(Boundary::Line));
                 }
                 TagEnd::TableCell => segments.push(Segment::Break(Boundary::Clause)),
                 _ => {}
@@ -448,7 +468,9 @@ mod tests {
         let code = doc.tokens.iter().find(|t| t.text == "code.").unwrap();
         assert_eq!(code.style, Style::Code);
         let one = doc.tokens.iter().find(|t| t.text == "one").unwrap();
-        assert_eq!(one.boundary, Boundary::Paragraph);
+        assert_eq!(one.boundary, Boundary::Line);
+        let two = doc.tokens.iter().find(|t| t.text == "two").unwrap();
+        assert_eq!(two.boundary, Boundary::Paragraph);
     }
 
     #[test]
@@ -489,6 +511,16 @@ mod tests {
         assert_eq!(doc.prev_sentence(3), 0);
         assert_eq!(doc.prev_sentence(5), 2);
         assert_eq!(doc.prev_sentence(0), 0);
+    }
+
+    #[test]
+    fn clause_and_paragraph_starts() {
+        let doc = parse("Alpha beta, gamma delta. Epsilon zeta.\n\nEta theta, iota.");
+        assert_eq!(doc.clause_start(3), 2);
+        assert_eq!(doc.clause_start(1), 0);
+        assert_eq!(doc.clause_start(5), 4);
+        assert_eq!(doc.paragraph_start(5), 0);
+        assert_eq!(doc.paragraph_start(8), 6);
     }
 
     #[test]

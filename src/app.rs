@@ -9,13 +9,14 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{
     Document, Element, Event, HtmlElement, HtmlInputElement, HtmlSelectElement, HtmlTextAreaElement,
-    KeyboardEvent, Storage, UrlSearchParams, Window,
+    KeyboardEvent, PointerEvent, Storage, UrlSearchParams, Window,
 };
 
 use crate::fetch;
 use crate::input::{classify, Input};
+use crate::resume::{self, PauseKind};
 use crate::settings::Settings;
-use crate::text::{self, Document as Doc, Style};
+use crate::text::{self, Boundary, Document as Doc, Style};
 use crate::timing::{self, Pacing};
 
 const SETTINGS_KEY: &str = "sicr.settings";
@@ -23,9 +24,14 @@ const LAST_KEY: &str = "sicr.last";
 const SAMPLE: &str = include_str!("../web/sample.md");
 /// Pause before the first word so the eye can settle on the pivot.
 const START_DELAY_MS: f64 = 400.0;
-/// Resuming backs up a few words for context, but never past the sentence start.
-const RESUME_REWIND: usize = 3;
-const RESUME_SENTENCE_WINDOW: usize = 8;
+/// Replays requested this close together step back one more sentence each, up to a limit.
+const ECHO_STACK_MS: f64 = 1500.0;
+const ECHO_STACK_MAX: u8 = 3;
+/// Words after a resume shown a little longer while the eye settles.
+const WARMUP: [f64; 3] = [1.5, 1.25, 1.1];
+/// A horizontal drag at least this long, and mostly horizontal, is a swipe.
+const SWIPE_MIN_PX: f64 = 40.0;
+const SWIPE_MAX_MS: f64 = 600.0;
 /// How long to wait for the word font before the first flash.
 const FONT_WAIT_MS: i32 = 1000;
 /// Largest document we keep in localStorage for "Continue last".
@@ -52,6 +58,7 @@ struct Els {
     word_font: HtmlSelectElement,
     guides: HtmlInputElement,
     orp: HtmlInputElement,
+    study: HtmlInputElement,
     proxy: HtmlInputElement,
     back_btn: HtmlElement,
     title: HtmlElement,
@@ -63,6 +70,7 @@ struct Els {
     word_pivot: HtmlElement,
     word_after: HtmlElement,
     context: HtmlElement,
+    hint: HtmlElement,
     scrub: HtmlInputElement,
     restart_btn: HtmlElement,
     prev_sent_btn: HtmlElement,
@@ -106,6 +114,24 @@ struct App {
     words_read: usize,
     /// Title from a `?title=` link, applied to the next document.
     title_override: Option<String>,
+    /// When and why playback last paused, for sizing the rewind on resume.
+    paused_at: Option<f64>,
+    pause_kind: PauseKind,
+    /// The reader moved the position while paused, so resume starts exactly there.
+    moved_while_paused: bool,
+    /// Words left in the post-resume warm-up.
+    warmup: usize,
+    /// Furthest word reached before a replay; the replayed text shows until it is passed.
+    replay_mark: Option<usize>,
+    echo_stack: u8,
+    last_echo_at: f64,
+    last_echo_target: usize,
+    /// Study mode is holding at a sentence end, waiting for a tap.
+    gated: bool,
+    /// Pointer-down position and time, for telling a swipe from a tap.
+    swipe_start: Option<(f64, f64, f64)>,
+    /// A swipe just ended; ignore the click the browser may send after it.
+    swallow_click_until: f64,
 }
 
 pub fn run() -> Result<(), JsValue> {
@@ -133,6 +159,17 @@ pub fn run() -> Result<(), JsValue> {
         elapsed_ms: 0.0,
         words_read: 0,
         title_override: None,
+        paused_at: None,
+        pause_kind: PauseKind::User,
+        moved_while_paused: false,
+        warmup: 0,
+        replay_mark: None,
+        echo_stack: 0,
+        last_echo_at: 0.0,
+        last_echo_target: 0,
+        gated: false,
+        swipe_start: None,
+        swallow_click_until: 0.0,
     }));
 
     install_timers(&app);
@@ -174,6 +211,7 @@ impl Els {
             word_font: get(document, "word-font")?,
             guides: get(document, "guides")?,
             orp: get(document, "orp")?,
+            study: get(document, "study")?,
             proxy: get(document, "proxy")?,
             back_btn: get(document, "back-btn")?,
             title: get(document, "title")?,
@@ -185,6 +223,7 @@ impl Els {
             word_pivot: get(document, "word-pivot")?,
             word_after: get(document, "word-after")?,
             context: get(document, "context")?,
+            hint: get(document, "hint")?,
             scrub: get(document, "scrub")?,
             restart_btn: get(document, "restart-btn")?,
             prev_sent_btn: get(document, "prev-sent-btn")?,
@@ -277,6 +316,7 @@ impl App {
         self.els.word_font.set_value(&s.word_font);
         self.els.guides.set_checked(s.show_guides);
         self.els.orp.set_checked(s.highlight_orp);
+        self.els.study.set_checked(s.study_mode);
         self.els.proxy.set_value(&s.proxy);
         for r in [
             &self.els.wpm_home,
@@ -329,6 +369,7 @@ impl App {
         s.word_font = self.els.word_font.value();
         s.show_guides = self.els.guides.checked();
         s.highlight_orp = self.els.orp.checked();
+        s.study_mode = self.els.study.checked();
         s.proxy = self.els.proxy.value();
         self.settings = self.settings.clone().clamped();
         self.apply_settings_to_ui();
@@ -355,6 +396,10 @@ impl App {
         self.finished = false;
         self.elapsed_ms = 0.0;
         self.words_read = 0;
+        self.paused_at = None;
+        self.moved_while_paused = false;
+        self.replay_mark = None;
+        self.gated = false;
         self.set_status("", false);
 
         let title = self.doc.title.clone().unwrap_or_default();
@@ -380,32 +425,57 @@ impl App {
         if self.doc.tokens.is_empty() || self.playing {
             return;
         }
+        if self.gated {
+            self.continue_gate();
+            return;
+        }
+        let mut rewound = 0;
         if self.finished {
             self.finished = false;
             self.idx = 0;
             self.elapsed_ms = 0.0;
             self.words_read = 0;
-        } else if self.idx > 0 {
-            let sentence_start = self.doc.sentence_start(self.idx);
-            self.idx = if self.idx - sentence_start <= RESUME_SENTENCE_WINDOW {
-                sentence_start
-            } else {
-                self.idx.saturating_sub(RESUME_REWIND)
-            };
+        } else if let Some(at) = self.paused_at {
+            let away = js_sys::Date::now() - at;
+            let target = resume::resume_target(
+                &self.doc,
+                self.idx,
+                away,
+                self.pause_kind,
+                self.moved_while_paused,
+                &|i| self.word_ms_at(i),
+            );
+            rewound = self.idx.saturating_sub(target);
+            self.idx = target;
         }
+        self.paused_at = None;
+        self.moved_while_paused = false;
+        self.warmup = WARMUP.len();
         self.playing = true;
         self.words_read += 1;
         self.render();
-        self.show_hint();
+        if rewound > 0 {
+            self.show_hint(&format!("\u{21BA} {rewound} words"));
+        } else {
+            self.show_hint("tap to pause");
+        }
         let ms = START_DELAY_MS + self.current_duration();
         self.schedule(ms);
     }
 
     fn pause(&mut self) {
+        self.pause_with(PauseKind::User);
+    }
+
+    fn pause_with(&mut self, kind: PauseKind) {
         self.clear_timer();
         let _ = self.els.stage.class_list().remove_1("show-hint");
         if self.playing {
             self.playing = false;
+            self.paused_at = Some(js_sys::Date::now());
+            self.pause_kind = kind;
+            self.moved_while_paused = false;
+            self.replay_mark = None;
             self.render();
             self.save_progress();
         }
@@ -427,14 +497,44 @@ impl App {
         if self.idx + 1 >= self.doc.tokens.len() {
             self.playing = false;
             self.finished = true;
+            self.replay_mark = None;
             self.render();
             self.save_progress();
             return;
         }
+        if self.settings.study_mode && self.doc.tokens[self.idx].boundary >= Boundary::Sentence {
+            self.enter_gate();
+            return;
+        }
         self.idx += 1;
         self.words_read += 1;
+        self.warmup = self.warmup.saturating_sub(1);
+        if self.replay_mark.is_some_and(|m| self.idx > m) {
+            self.replay_mark = None;
+        }
         self.render();
         let ms = self.current_duration();
+        self.schedule(ms);
+    }
+
+    /// Study mode: stop at a sentence end with the sentence shown until the reader taps.
+    fn enter_gate(&mut self) {
+        self.playing = false;
+        self.gated = true;
+        self.replay_mark = None;
+        self.render();
+        self.show_hint("tap to continue");
+    }
+
+    fn continue_gate(&mut self) {
+        self.gated = false;
+        self.playing = true;
+        if self.idx + 1 < self.doc.tokens.len() {
+            self.idx += 1;
+            self.words_read += 1;
+        }
+        self.render();
+        let ms = START_DELAY_MS / 2.0 + self.current_duration();
         self.schedule(ms);
     }
 
@@ -445,6 +545,15 @@ impl App {
         self.clear_timer();
         self.idx = idx.min(self.doc.tokens.len() - 1);
         self.finished = false;
+        if self.gated {
+            // Moving off a study-mode hold turns it into an ordinary pause at the new spot.
+            self.gated = false;
+            self.paused_at = Some(js_sys::Date::now());
+        }
+        if !self.playing {
+            self.moved_while_paused = true;
+            self.replay_mark = None;
+        }
         self.render();
         if self.playing {
             let ms = START_DELAY_MS / 2.0 + self.current_duration();
@@ -452,12 +561,67 @@ impl App {
         }
     }
 
-    fn current_duration(&self) -> f64 {
+    /// Replay the sentence the reader most likely meant, without stopping. Repeated
+    /// requests in quick succession step back one more sentence each.
+    fn echo(&mut self) {
+        if self.doc.tokens.is_empty() {
+            return;
+        }
+        let now = js_sys::Date::now();
+        let stacking = self.echo_stack > 0
+            && now - self.last_echo_at < ECHO_STACK_MS
+            && self.echo_stack < ECHO_STACK_MAX;
+        let target = if stacking {
+            self.echo_stack += 1;
+            self.doc.prev_sentence(self.last_echo_target)
+        } else {
+            self.echo_stack = 1;
+            resume::reaction_sentence(&self.doc, self.idx, &|i| self.word_ms_at(i))
+        };
+        self.last_echo_at = now;
+        self.last_echo_target = target;
+        let mark = self.replay_mark.unwrap_or(self.idx).max(self.idx);
+        self.gated = false;
+        if self.playing {
+            self.seek(target);
+        } else {
+            self.finished = false;
+            self.idx = target;
+            self.paused_at = None;
+            self.play();
+        }
+        self.replay_mark = Some(mark);
+        self.render();
+        self.show_hint(&format!("\u{21BA} {}", self.echo_stack));
+    }
+
+    /// During a replay, jump straight back to where the reader had got to.
+    fn return_to_mark(&mut self) {
+        if let Some(mark) = self.replay_mark.take() {
+            self.seek(mark);
+            self.render();
+        }
+    }
+
+    fn word_ms_at(&self, i: usize) -> f64 {
         self.doc
             .tokens
-            .get(self.idx)
-            .map(|t| timing::duration_ms(t, &self.pacing()))
+            .get(i)
+            .map(|t| timing::word_ms(t, &self.pacing()))
             .unwrap_or(0.0)
+    }
+
+    fn current_duration(&self) -> f64 {
+        let Some(t) = self.doc.tokens.get(self.idx) else {
+            return 0.0;
+        };
+        let pacing = self.pacing();
+        // The first words after a resume stay up a little longer while the eye settles.
+        let warm = match self.warmup {
+            0 => 1.0,
+            n => WARMUP[WARMUP.len() - n],
+        };
+        timing::word_ms(t, &pacing) * warm + timing::hold_ms(t, &pacing)
     }
 
     fn schedule(&mut self, ms: f64) {
@@ -480,7 +644,8 @@ impl App {
         }
     }
 
-    fn show_hint(&mut self) {
+    fn show_hint(&mut self, text: &str) {
+        self.els.hint.set_text_content(Some(text));
         let _ = self.els.stage.class_list().add_1("show-hint");
         if let Some(h) = self.hint_timer.take() {
             self.window.clear_timeout_with_handle(h);
@@ -544,7 +709,13 @@ impl App {
             .play_btn
             .set_attribute("aria-label", if self.playing { "Pause" } else { "Play" })
             .ok();
-        toggle_class(&self.els.stage, "paused", !self.playing);
+        toggle_class(&self.els.stage, "paused", !self.playing && !self.gated);
+        toggle_class(&self.els.stage, "gated", self.gated);
+        toggle_class(
+            &self.els.stage,
+            "replay",
+            self.playing && self.replay_mark.is_some(),
+        );
         self.els.scrub.set_value(&self.idx.to_string());
         set_range_fill(&self.els.scrub);
         let progress = if self.doc.tokens.len() > 1 {
@@ -558,7 +729,7 @@ impl App {
             .style()
             .set_property("--progress", &format!("{progress:.4}"));
         self.render_meta();
-        if self.playing {
+        if self.playing && self.replay_mark.is_none() {
             self.els.context.set_text_content(None);
         } else {
             self.render_context();
@@ -621,8 +792,18 @@ impl App {
             }
             return;
         }
-        let start = self.doc.sentence_start(self.idx);
-        let end = self.doc.sentence_end(self.idx);
+        // A late tap shows the sentence that resume will replay, then the new one's first words.
+        let current = self.doc.sentence_start(self.idx);
+        let late = !self.playing && !self.gated && !self.moved_while_paused && {
+            let meant = resume::reaction_sentence(&self.doc, self.idx, &|i| self.word_ms_at(i));
+            meant < current
+        };
+        let (start, end) = if late {
+            (self.doc.sentence_start(current - 1), self.idx + 1)
+        } else {
+            (current, self.doc.sentence_end(self.idx))
+        };
+        let mut marked: Option<Element> = None;
         for i in start..end {
             let t = &self.doc.tokens[i];
             // Pieces of a split word are shown joined, without the split hyphen.
@@ -639,12 +820,27 @@ impl App {
             if i == self.idx {
                 if let Ok(mark) = self.document.create_element("mark") {
                     mark.set_text_content(Some(&text));
+                    if late {
+                        mark.set_class_name("after");
+                    }
                     let _ = ctx.append_child(&mark);
+                    marked = Some(mark);
+                }
+            } else if late && i >= current {
+                if let Ok(span) = self.document.create_element("span") {
+                    span.set_class_name("after");
+                    span.set_text_content(Some(&text));
+                    let _ = ctx.append_child(&span);
                 }
             } else {
                 let node = self.document.create_text_node(&text);
                 let _ = ctx.append_child(&node);
             }
+        }
+        // Long sentences scroll; keep the marked word about a third of the way down.
+        if let Some(mark) = marked.and_then(|m| m.dyn_into::<HtmlElement>().ok()) {
+            let top = mark.offset_top() - ctx.client_height() / 3;
+            ctx.set_scroll_top(top.max(0));
         }
     }
 
@@ -793,6 +989,8 @@ fn continue_last(app: &Shared) {
         return;
     }
     start_doc_gated(app, doc, saved.text, saved.url, saved.idx, false);
+    // Coming back to a saved read rewinds to the paragraph start on play.
+    app.borrow_mut().paused_at = Some(0.0);
 }
 
 fn paste_and_read(app: &Shared) {
@@ -916,13 +1114,14 @@ fn wire_events(app: &Shared) {
             read_input(&app, SAMPLE.to_string(), true);
         });
     }
-    let setting_inputs: [&web_sys::EventTarget; 6] = [
+    let setting_inputs: [&web_sys::EventTarget; 7] = [
         &els.pause_scale,
         &els.font_size,
         &els.theme,
         &els.word_font,
         &els.guides,
         &els.orp,
+        &els.study,
     ];
     for el in setting_inputs {
         let app = app.clone();
@@ -949,7 +1148,53 @@ fn wire_events(app: &Shared) {
     }
     {
         let app = app.clone();
-        on(&els.stage, "click", move |_| app.borrow_mut().toggle());
+        on(&els.stage, "click", move |_| {
+            let mut a = app.borrow_mut();
+            if js_sys::Date::now() < a.swallow_click_until {
+                return;
+            }
+            a.toggle();
+        });
+    }
+    {
+        let app = app.clone();
+        on(&els.stage, "pointerdown", move |e| {
+            let Some(pe) = e.dyn_ref::<PointerEvent>() else {
+                return;
+            };
+            app.borrow_mut().swipe_start =
+                Some((pe.client_x() as f64, pe.client_y() as f64, js_sys::Date::now()));
+        });
+    }
+    {
+        let app = app.clone();
+        on(&els.stage, "pointerup", move |e| {
+            let Some(pe) = e.dyn_ref::<PointerEvent>() else {
+                return;
+            };
+            let mut a = app.borrow_mut();
+            let Some((x0, y0, t0)) = a.swipe_start.take() else {
+                return;
+            };
+            let (dx, dy) = (pe.client_x() as f64 - x0, pe.client_y() as f64 - y0);
+            let now = js_sys::Date::now();
+            if dx.abs() < SWIPE_MIN_PX || dx.abs() < 1.5 * dy.abs() || now - t0 > SWIPE_MAX_MS {
+                return;
+            }
+            a.swallow_click_until = now + 400.0;
+            // Finger moving right means "back", as in e-readers; left returns from a replay.
+            if dx > 0.0 {
+                a.echo();
+            } else {
+                a.return_to_mark();
+            }
+        });
+    }
+    {
+        let app = app.clone();
+        on(&els.stage, "pointercancel", move |_| {
+            app.borrow_mut().swipe_start = None
+        });
     }
     {
         let app = app.clone();
@@ -983,8 +1228,12 @@ fn wire_events(app: &Shared) {
         let app = app.clone();
         on(&els.prev_sent_btn, "click", move |_| {
             let mut a = app.borrow_mut();
-            let i = a.doc.prev_sentence(a.idx);
-            a.seek(i);
+            if a.playing {
+                a.echo();
+            } else {
+                let i = a.doc.prev_sentence(a.idx);
+                a.seek(i);
+            }
         });
     }
     {
@@ -1045,7 +1294,7 @@ fn wire_events(app: &Shared) {
         on(&a.document, "visibilitychange", move |_| {
             let mut a = app.borrow_mut();
             if a.document.hidden() {
-                a.pause();
+                a.pause_with(PauseKind::Auto);
                 a.save_progress();
             }
         });
@@ -1081,6 +1330,10 @@ fn handle_key(app: &Shared, ke: &KeyboardEvent) {
             a.toggle();
             true
         }
+        "ArrowLeft" | "j" if ke.shift_key() && a.playing => {
+            a.echo();
+            true
+        }
         "ArrowLeft" | "j" => {
             let i = if ke.shift_key() {
                 a.doc.prev_sentence(a.idx)
@@ -1088,6 +1341,14 @@ fn handle_key(app: &Shared, ke: &KeyboardEvent) {
                 a.idx.saturating_sub(1)
             };
             a.seek(i);
+            true
+        }
+        "Backspace" => {
+            a.echo();
+            true
+        }
+        "[" if a.playing => {
+            a.echo();
             true
         }
         "ArrowRight" | "l" => {

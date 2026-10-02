@@ -556,6 +556,8 @@ input[type="range"]:focus-visible { outline: 1px solid var(--accent); outline-of
 .stage:not(.paused) + .dock:focus-within { opacity: 1; }
 
 .stage {
+  /* Vertical pans scroll the paused context; horizontal swipes reach the replay gesture. */
+  touch-action: pan-y;
   position: relative;
   flex: 1;
   display: flex;
@@ -625,7 +627,10 @@ input[type="range"]:focus-visible { outline: 1px solid var(--accent); outline-of
   left: 1.25rem;
   right: 1.25rem;
   max-height: 32%;
-  overflow: hidden;
+  /* Long sentences scroll instead of being cut off; the reader keeps the marked word in view. */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
   text-align: center;
   color: var(--fg-2);
   font-size: 1rem;
@@ -634,7 +639,15 @@ input[type="range"]:focus-visible { outline: 1px solid var(--accent); outline-of
   opacity: 0;
   transition: opacity 0.18s ease;
 }
-.stage.paused .context { opacity: 1; }
+.stage.paused .context,
+.stage.gated .context,
+.stage.replay .context { opacity: 1; }
+.context::-webkit-scrollbar { display: none; }
+/* A late tap shows the sentence that will be replayed, then the new one's first words, dimmed. */
+.context .after { color: var(--fg-3); }
+/* While a replayed sentence plays, it sits still under the word; the current word is brighter. */
+.stage.replay .context { color: var(--fg-3); }
+.stage.replay .context mark { color: var(--fg-2); font-weight: 400; }
 .context mark { background: transparent; color: var(--fg); font-weight: 500; }
 
 .context .done {
