@@ -693,6 +693,58 @@ input[type="range"]:focus-visible { outline: 1px solid var(--accent); outline-of
 }
 .context .done .readout { color: var(--fg); }
 
+/* Outline on pause: one mono row per heading in the empty top half of the stage. The
+   row's bottom hairline doubles as its progress fill; the current row carries the accent. */
+.map {
+  position: absolute;
+  top: 0.75rem;
+  left: 1rem;
+  right: 1rem;
+  /* Stays above the upper guide tick, which sits at 50% - 0.8 word sizes. */
+  max-height: calc(50% - var(--word-size) * 1.15);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+.map::-webkit-scrollbar { display: none; }
+.stage.paused .map { opacity: 1; pointer-events: auto; }
+.map li {
+  position: relative;
+  display: grid;
+  grid-template-columns: 2ch 1fr auto;
+  column-gap: 0.75rem;
+  padding: 0.55rem 0 0.55rem calc(max(0, var(--level, 2) - 2) * 1ch);
+  border-bottom: 1px solid var(--line);
+  color: var(--fg-3);
+  cursor: pointer;
+  transition: color 0.12s ease;
+}
+.map li .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.map li .time { font-variant-numeric: tabular-nums; }
+.map li::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: -1px;
+  height: 1px;
+  width: calc(var(--fill, 0) * 100%);
+  background: var(--fg-3);
+  transition: width 0.12s linear;
+}
+.map li.now { color: var(--fg); }
+.map li.now .idx { color: var(--accent); }
+.map li.now::after { background: var(--accent); }
+@media (hover: hover) {
+  .map li:hover { color: var(--fg-2); }
+  .map li.now:hover { color: var(--fg); }
+}
+
 .hint {
   position: absolute;
   bottom: 0.9rem;
@@ -774,8 +826,19 @@ button.play:active { background: transparent; color: var(--accent); }
   .speed { grid-area: speed; }
   .hint { bottom: 0.4rem; }
   .context { max-height: 24%; }
+  /* No room above the word on a short landscape phone. */
+  .map { display: none; }
 }
 
 @media (min-width: 900px) {
   .dock { max-width: 40rem; width: 100%; margin-left: auto; margin-right: auto; }
+  /* The outline becomes a top-left rail, clear of the centred word and sentence. */
+  .map {
+    top: 1rem;
+    left: 1.5rem;
+    right: auto;
+    width: min(16rem, 24vw);
+    /* Ends a little below the word's line, so it never runs into the sentence under it. */
+    max-height: calc(50% + var(--word-size) * 0.9);
+  }
 }

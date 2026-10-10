@@ -91,6 +91,20 @@ impl Document {
         self.sections.partition_point(|s| s.start <= idx).checked_sub(1)
     }
 
+    /// Token range `[start, end)` of section `i`; the last section runs to the end.
+    pub fn section_range(&self, i: usize) -> (usize, usize) {
+        let start = self.sections[i].start;
+        let end = self.sections.get(i + 1).map_or(self.tokens.len(), |s| s.start);
+        (start, end)
+    }
+
+    /// Indices of the sections that belong in an outline or on a map. A heading that
+    /// opens the document is its title, not a section of it, so it is left out.
+    pub fn outline(&self) -> std::ops::Range<usize> {
+        let skip = usize::from(self.sections.first().is_some_and(|s| s.start == 0));
+        skip..self.sections.len()
+    }
+
     /// The section whose start lies within `radius` tokens of `idx`; ties go to the earlier one.
     pub fn nearest_section(&self, idx: usize, radius: usize) -> Option<usize> {
         let after = self.sections.partition_point(|s| s.start <= idx);
@@ -437,6 +451,8 @@ fn segments_to_tokens(segments: &[Segment]) -> (Vec<Token>, Vec<Section>, Vec<Bl
     if let Some(last) = tokens.last_mut() {
         last.boundary = Boundary::Paragraph;
     }
+    // A heading with no words after it would point past the end.
+    sections.retain(|s| s.start < tokens.len());
     (tokens, sections, blocks)
 }
 
@@ -839,5 +855,39 @@ Does the 15% stickiness margin hold at night, when there are fewer orders and a 
         let plain = parse("no headings here at all.");
         assert_eq!(plain.section_at(2), None);
         assert_eq!(plain.nearest_section(0, 10), None);
+    }
+
+    #[test]
+    fn section_range_covers_whole_section() {
+        let doc = parse(STRUCTURED);
+        let (start, end) = doc.section_range(2);
+        assert_eq!(doc.sections[2].title, "What we measured");
+        assert_eq!(doc.section_at(start), Some(2));
+        assert_eq!(doc.section_at(end - 1), Some(2));
+        assert_eq!(doc.section_at(end), Some(3));
+        let last = doc.sections.len() - 1;
+        assert_eq!(doc.section_range(last).1, doc.tokens.len());
+        assert_eq!(doc.section_at(doc.tokens.len() - 1), Some(last));
+    }
+
+    #[test]
+    fn outline_leaves_out_the_opening_title() {
+        let doc = parse(STRUCTURED);
+        assert_eq!(doc.outline(), 1..6);
+        // Text before the first heading makes it a real section to jump to.
+        let doc = parse("An intro line.\n\n# Heading\n\nBody.");
+        assert_eq!(doc.outline(), 0..1);
+        let plain = parse("Just a paragraph. And another sentence.\n\nA second paragraph.");
+        assert!(plain.sections.is_empty());
+        assert_eq!(plain.outline(), 0..0);
+        assert_eq!(plain.section_at(3), None);
+    }
+
+    #[test]
+    fn heading_without_words_is_not_a_section() {
+        // An emoji-only heading leaves no tokens behind, so it cannot start a section.
+        let doc = parse("Body text here.\n\n## :tada:");
+        assert_eq!(words(&doc), vec!["Body", "text", "here."]);
+        assert!(doc.sections.is_empty());
     }
 }

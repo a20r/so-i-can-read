@@ -66,6 +66,7 @@ struct Els {
     progress_text: HtmlElement,
     time_left: HtmlElement,
     stage: HtmlElement,
+    map: HtmlElement,
     word: HtmlElement,
     word_before: HtmlElement,
     word_pivot: HtmlElement,
@@ -138,6 +139,8 @@ struct App {
     ticks: Vec<(usize, Element)>,
     /// A finger or mouse button is down on the scrub track.
     scrub_pointer: bool,
+    /// Indices into `doc.sections` shown as outline rows, in order; the title heading is left out.
+    map_rows: Vec<usize>,
 }
 
 /// Dragging the scrub this close to a heading (in words, or in pixels of track) lands on it.
@@ -183,6 +186,7 @@ pub fn run() -> Result<(), JsValue> {
         swallow_click_until: 0.0,
         ticks: Vec::new(),
         scrub_pointer: false,
+        map_rows: Vec::new(),
     }));
 
     install_timers(&app);
@@ -232,6 +236,7 @@ impl Els {
             progress_text: get(document, "progress-text")?,
             time_left: get(document, "time-left")?,
             stage: get(document, "stage")?,
+            map: get(document, "map")?,
             word: get(document, "word")?,
             word_before: get(document, "word-before")?,
             word_pivot: get(document, "word-pivot")?,
@@ -373,6 +378,9 @@ impl App {
         set_range_fill(&self.els.wpm);
         self.save_settings();
         self.render_meta();
+        if !self.playing && !self.gated {
+            self.render_map();
+        }
     }
 
     fn read_settings_from_ui(&mut self) {
@@ -401,6 +409,7 @@ impl App {
         self.clear_timer();
         self.loading = false;
         self.doc = doc;
+        self.map_rows = self.doc.outline().collect();
         if let Some(title) = self.title_override.take() {
             self.doc.title = Some(title);
         }
@@ -425,6 +434,7 @@ impl App {
         self.build_landmarks();
         self.els.home.set_hidden(true);
         self.els.reader.set_hidden(false);
+        self.build_map();
         let _ = self.els.stage.focus();
         self.render();
     }
@@ -564,11 +574,9 @@ impl App {
         }
         // The same mapping as the progress fill, so the fill head lands on a tick at a heading.
         let x = |i: usize| i as f64 / (n - 1) as f64 * 100.0;
-        for (k, s) in self.doc.sections.iter().enumerate() {
-            // The title at the very start needs no tick.
-            if s.start == 0 {
-                continue;
-            }
+        // The title heading needs no tick.
+        let outline = self.doc.outline();
+        for (k, s) in self.doc.sections.iter().enumerate().skip(outline.start) {
             if let Ok(el) = self.document.create_element("i") {
                 let _ = el.set_attribute("data-s", &k.to_string());
                 let _ = el.set_attribute("style", &format!("--x:{:.3}%", x(s.start)));
@@ -612,11 +620,12 @@ impl App {
         } else {
             None
         };
+        let outline = self.doc.outline();
         match near {
-            Some(k) if self.doc.sections[k].start > 0 => {
+            Some(k) if outline.contains(&k) => {
                 let s = &self.doc.sections[k];
                 // Numbered after the title, so the first real heading is 01.
-                let number = k + 1 - usize::from(self.doc.sections[0].start == 0);
+                let number = k + 1 - outline.start;
                 let text = format!("{number:02} \u{00B7} {}", s.title.to_uppercase());
                 (s.start, Some(text), true)
             }
@@ -829,6 +838,102 @@ impl App {
             self.els.context.set_text_content(None);
         } else {
             self.render_context();
+        }
+        // The outline only matters while the reader is stopped by choice (or done).
+        if !self.playing && !self.gated {
+            self.render_map();
+        }
+    }
+
+    /// Fill the outline with one row per section, numbered for the digit keys.
+    fn build_map(&self) {
+        let map = &self.els.map;
+        map.set_inner_html("");
+        for (n, &i) in self.map_rows.iter().enumerate() {
+            let s = &self.doc.sections[i];
+            let (Ok(li), Ok(idx), Ok(name), Ok(time)) = (
+                self.document.create_element("li"),
+                self.document.create_element("span"),
+                self.document.create_element("span"),
+                self.document.create_element("span"),
+            ) else {
+                continue;
+            };
+            let _ = li.set_attribute("data-i", &i.to_string());
+            let _ = li.set_attribute("data-start", &s.start.to_string());
+            let _ = li.set_attribute("style", &format!("--level:{}", s.level));
+            idx.set_class_name("idx");
+            idx.set_text_content(Some(&format!("{:02}", n + 1)));
+            name.set_class_name("name");
+            name.set_text_content(Some(&s.title));
+            time.set_class_name("time");
+            let _ = li.append_child(&idx);
+            let _ = li.append_child(&name);
+            let _ = li.append_child(&time);
+            let _ = map.append_child(&li);
+        }
+        map.set_hidden(self.map_rows.is_empty());
+    }
+
+    /// Mark the current section, fill each row's hairline and show the time still to read.
+    fn render_map(&self) {
+        if self.map_rows.is_empty() {
+            return;
+        }
+        let map = &self.els.map;
+        let rows = map.children();
+        let pacing = self.pacing();
+        // Once the document is done, every row reads as finished.
+        let current = if self.finished {
+            None
+        } else {
+            self.doc.section_at(self.idx)
+        };
+        let mut now: Option<HtmlElement> = None;
+        for (n, &i) in self.map_rows.iter().enumerate() {
+            let Some(li) = rows.item(n as u32).and_then(|e| e.dyn_into::<HtmlElement>().ok()) else {
+                continue;
+            };
+            let (start, end) = self.doc.section_range(i);
+            let is_now = current == Some(i);
+            let (fill, time) = if self.finished || self.idx >= end {
+                (1.0, String::new())
+            } else if is_now {
+                (
+                    (self.idx - start + 1) as f64 / (end - start).max(1) as f64,
+                    timing::format_clock(timing::total_ms(&self.doc.tokens[self.idx + 1..end], &pacing)),
+                )
+            } else {
+                (
+                    0.0,
+                    timing::format_clock(timing::total_ms(&self.doc.tokens[start..end], &pacing)),
+                )
+            };
+            toggle_class(&li, "now", is_now);
+            let _ = li.style().set_property("--fill", &format!("{fill:.4}"));
+            if let Ok(Some(t)) = li.query_selector(".time") {
+                t.set_text_content(Some(&time));
+            }
+            if is_now {
+                now = Some(li);
+            }
+        }
+        // A long outline scrolls; keep the current row about a third of the way down.
+        if let Some(li) = now {
+            let top = li.offset_top() - map.client_height() / 3;
+            map.set_scroll_top(top.max(0));
+        }
+    }
+
+    /// Jump to the start of the nth outline row (0-based), if there is one.
+    fn jump_to_row(&mut self, n: usize) -> bool {
+        match self.map_rows.get(n) {
+            Some(&i) => {
+                let start = self.doc.sections[i].start;
+                self.seek(start);
+                true
+            }
+            None => false,
         }
     }
 
@@ -1262,6 +1367,26 @@ fn wire_events(app: &Shared) {
         });
     }
     {
+        // A tap on an outline row jumps there and must not reach the stage's play/pause toggle.
+        let app = app.clone();
+        on(&els.map, "click", move |e| {
+            e.stop_propagation();
+            // A swipe that ends over the outline is still a swipe, not a tap on a row.
+            if js_sys::Date::now() < app.borrow().swallow_click_until {
+                return;
+            }
+            let start = e
+                .target()
+                .and_then(|t| t.dyn_into::<Element>().ok())
+                .and_then(|el| el.closest("[data-start]").ok().flatten())
+                .and_then(|row| row.get_attribute("data-start"))
+                .and_then(|s| s.parse::<usize>().ok());
+            if let Some(start) = start {
+                app.borrow_mut().seek(start);
+            }
+        });
+    }
+    {
         let app = app.clone();
         on(&els.stage, "pointerdown", move |e| {
             let Some(pe) = e.dyn_ref::<PointerEvent>() else {
@@ -1539,6 +1664,11 @@ fn handle_key(app: &Shared, ke: &KeyboardEvent) {
         "Escape" => {
             a.go_home();
             true
+        }
+        // The outline's row numbers double as its key legend.
+        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" if !a.playing && !a.gated => {
+            let n = key.as_bytes()[0] - b'1';
+            a.jump_to_row(n as usize)
         }
         _ => false,
     };
