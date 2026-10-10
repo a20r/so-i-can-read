@@ -400,14 +400,29 @@ fn segments_to_tokens(segments: &[Segment]) -> (Vec<Token>, Vec<Section>, Vec<Bl
     for seg in segments {
         match seg {
             Segment::Text { text, style } => {
+                let mut text = text.as_str();
                 if !pending.is_empty() && pending_style != *style {
                     if pending.ends_with(char::is_whitespace) || text.starts_with(char::is_whitespace) {
                         flush(&mut tokens, &mut pending, pending_style);
                         pending_style = *style;
-                    }
-                    // Styled runs glued to plain text keep the more visible style.
-                    else if pending_style == Style::Normal {
+                    } else {
+                        // A glued junction ("**bold**. Next") joins only the head of the new
+                        // run to the pending word; the rest takes its own style.
+                        let (head, tail) = match text.find(char::is_whitespace) {
+                            Some(at) => text.split_at(at),
+                            None => (text, ""),
+                        };
+                        // Styled runs glued to plain text keep the more visible style.
+                        if pending_style == Style::Normal {
+                            pending_style = *style;
+                        }
+                        pending.push_str(head);
+                        if tail.is_empty() {
+                            continue;
+                        }
+                        flush(&mut tokens, &mut pending, pending_style);
                         pending_style = *style;
+                        text = tail;
                     }
                 } else if pending.is_empty() {
                     pending_style = *style;
@@ -889,5 +904,23 @@ Does the 15% stickiness margin hold at night, when there are fewer orders and a 
         let doc = parse("Body text here.\n\n## :tada:");
         assert_eq!(words(&doc), vec!["Body", "text", "here."]);
         assert!(doc.sections.is_empty());
+    }
+
+    #[test]
+    fn style_does_not_leak_across_glued_junction() {
+        let doc = parse("The dispatcher runs every **90 seconds**. Each run looks at orders.");
+        let seconds = doc.tokens.iter().find(|t| t.text == "seconds.").unwrap();
+        assert_eq!(seconds.style, Style::Strong);
+        assert_eq!(seconds.boundary, Boundary::Sentence);
+        let each = doc.tokens.iter().find(|t| t.text == "Each").unwrap();
+        assert_eq!(each.style, Style::Normal);
+        let doc = parse("See **bold**text and *soft*, then plain.");
+        assert_eq!(
+            words(&doc),
+            vec!["See", "boldtext", "and", "soft,", "then", "plain."]
+        );
+        assert_eq!(doc.tokens[1].style, Style::Strong);
+        assert_eq!(doc.tokens[3].style, Style::Emphasis);
+        assert_eq!(doc.tokens[4].style, Style::Normal);
     }
 }
