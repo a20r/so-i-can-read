@@ -141,10 +141,20 @@ impl Document {
 
     /// The section whose start lies within `radius` tokens of `idx`; ties go to the earlier one.
     pub fn nearest_section(&self, idx: usize, radius: usize) -> Option<usize> {
+        self.nearest_section_in(0..self.sections.len(), idx, radius)
+    }
+
+    /// Like `nearest_section`, but only sections whose index is in `range` are candidates.
+    pub fn nearest_section_in(
+        &self,
+        range: std::ops::Range<usize>,
+        idx: usize,
+        radius: usize,
+    ) -> Option<usize> {
         let after = self.sections.partition_point(|s| s.start <= idx);
         let mut best: Option<(usize, usize)> = None;
         for k in after.checked_sub(1).into_iter().chain(Some(after)) {
-            let Some(s) = self.sections.get(k) else {
+            let Some(s) = self.sections.get(k).filter(|_| range.contains(&k)) else {
                 continue;
             };
             let d = s.start.abs_diff(idx);
@@ -162,12 +172,22 @@ impl Document {
         (list.end > idx).then_some(list)
     }
 
+    /// The top-level block (list, table, code or quote) containing token `idx`, if any.
+    pub fn block_at(&self, idx: usize) -> Option<&Block> {
+        let i = self.blocks.partition_point(|b| b.start <= idx);
+        let block = self.blocks.get(i.checked_sub(1)?)?;
+        (block.end > idx).then_some(block)
+    }
+
     /// The paragraph that introduces `list` ("Things we are not changing:"), as a token
-    /// range, when the text right before the list ends with a colon and is not itself
-    /// part of a list.
+    /// range, when the text right before the list ends with a colon and is prose: not a
+    /// list item, a code line or a table cell.
     pub fn list_intro(&self, list: &ListBlock) -> Option<(usize, usize)> {
         let last = list.start.checked_sub(1)?;
-        if !self.tokens.get(last)?.text.ends_with(':') || self.list_at(last).is_some() {
+        if !self.tokens.get(last)?.text.ends_with(':') {
+            return None;
+        }
+        if self.block_at(last).is_some_and(|b| b.kind != BlockKind::Quote) {
             return None;
         }
         Some((self.paragraph_start(last), list.start))
@@ -331,6 +351,8 @@ fn markdown_segments(input: &str) -> (Option<String>, Vec<Segment>) {
                 Tag::Emphasis => style_stack.push(Style::Emphasis),
                 Tag::CodeBlock(_) => {
                     style_stack.push(Style::Code);
+                    // A nested block starts a new line inside a tight list item.
+                    segments.push(Segment::Break(Boundary::Line));
                     open_block(&mut segments, &mut block_depth, BlockKind::Code);
                 }
                 Tag::List(start) => {
@@ -355,8 +377,14 @@ fn markdown_segments(input: &str) -> (Option<String>, Vec<Segment>) {
                         number,
                     });
                 }
-                Tag::Table(_) => open_block(&mut segments, &mut block_depth, BlockKind::Table),
-                Tag::BlockQuote(_) => open_block(&mut segments, &mut block_depth, BlockKind::Quote),
+                Tag::Table(_) => {
+                    segments.push(Segment::Break(Boundary::Line));
+                    open_block(&mut segments, &mut block_depth, BlockKind::Table);
+                }
+                Tag::BlockQuote(_) => {
+                    segments.push(Segment::Break(Boundary::Line));
+                    open_block(&mut segments, &mut block_depth, BlockKind::Quote);
+                }
                 Tag::Image { .. } => {
                     // Alt text is the only readable part of an image.
                     style_stack.push(Style::Emphasis);
@@ -369,7 +397,12 @@ fn markdown_segments(input: &str) -> (Option<String>, Vec<Segment>) {
                 TagEnd::Heading(_) => {
                     style_stack.pop();
                     if let Some(h) = heading_buf.take() {
-                        let h = h.trim().to_string();
+                        // The title reads like its tokens: emoji codes dropped, whitespace squeezed.
+                        let h = h
+                            .split_whitespace()
+                            .filter(|w| !slack::is_emoji_code(w))
+                            .collect::<Vec<_>>()
+                            .join(" ");
                         if let Some(Segment::Section { title: t, .. }) =
                             section_idx.take().and_then(|i| segments.get_mut(i))
                         {
@@ -439,8 +472,13 @@ fn markdown_segments(input: &str) -> (Option<String>, Vec<Segment>) {
                 }
                 push_text(&mut segments, &c, Style::Code);
             }
-            Event::SoftBreak => segments.push(Segment::Break(Boundary::Clause)),
-            Event::HardBreak => segments.push(Segment::Break(Boundary::Clause)),
+            Event::SoftBreak | Event::HardBreak => {
+                // A heading written over two lines keeps a space between them in its title.
+                if let Some(h) = heading_buf.as_mut() {
+                    h.push(' ');
+                }
+                segments.push(Segment::Break(Boundary::Clause));
+            }
             Event::Rule => segments.push(Segment::Break(Boundary::Paragraph)),
             Event::TaskListMarker(checked) => segments.push(Segment::Task(checked)),
             Event::FootnoteReference(_) => {}
@@ -502,8 +540,14 @@ fn segments_to_tokens(segments: &[Segment]) -> Document {
                             Some(at) => text.split_at(at),
                             None => (text, ""),
                         };
-                        // Styled runs glued to plain text keep the more visible style.
+                        // Styled runs glued to plain text keep the more visible style, but only
+                        // for the word they touch; earlier plain words stay plain.
                         if pending_style == Style::Normal {
+                            if let Some(at) = pending.rfind(char::is_whitespace) {
+                                let word = pending.split_off(at);
+                                flush(&mut tokens, &mut pending, pending_style);
+                                pending = word;
+                            }
                             pending_style = *style;
                         }
                         pending.push_str(head);
@@ -525,6 +569,11 @@ fn segments_to_tokens(segments: &[Segment]) -> Document {
                     if last.boundary < *b {
                         last.boundary = *b;
                     }
+                }
+                // A heading closes with a paragraph break; one that left no words behind
+                // cannot start a section.
+                if *b == Boundary::Paragraph && sections.last().is_some_and(|s| s.start == tokens.len()) {
+                    sections.pop();
                 }
             }
             Segment::Section { level, title } => {
@@ -1180,5 +1229,83 @@ Does the 15% stickiness margin hold at night, when there are fewer orders and a 
         assert_eq!(items[1].task, Some(false));
         assert_eq!(items[2].task, None);
         assert_eq!(doc.tokens[items[0].start].text, "shipped");
+    }
+
+    #[test]
+    fn tight_item_followed_by_nested_block() {
+        let doc = parse("1. Install it:\n   ```sh\n   cargo install thing\n   ```\n2. Run it\n");
+        let got: Vec<(&str, Style)> = doc.tokens.iter().map(|t| (t.text.as_str(), t.style)).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("Install", Style::Normal),
+                ("it:", Style::Normal),
+                ("cargo", Style::Code),
+                ("install", Style::Code),
+                ("thing", Style::Code),
+                ("Run", Style::Normal),
+                ("it", Style::Normal),
+            ]
+        );
+        assert_eq!(words(&parse("- item\n  > quote in item\n- next\n"))[0], "item");
+        assert_eq!(
+            words(&parse("- item\n  | a | b |\n  |---|---|\n  | c | d |\n- next\n"))[0],
+            "item"
+        );
+    }
+
+    #[test]
+    fn plain_words_before_a_glued_run_stay_plain() {
+        let doc = parse("one two**bold** rest");
+        assert_eq!(words(&doc), vec!["one", "twobold", "rest"]);
+        assert_eq!(doc.tokens[0].style, Style::Normal);
+        assert_eq!(doc.tokens[1].style, Style::Strong);
+        assert_eq!(doc.tokens[2].style, Style::Normal);
+    }
+
+    #[test]
+    fn emoji_only_heading_mid_document_is_not_a_section() {
+        let doc =
+            parse("Intro paragraph here.\n\n## :tada:\n\n## Real section\n\nBody text of the real section.");
+        let titles: Vec<&str> = doc.sections.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, vec!["Real section"]);
+        assert!(doc.sections.windows(2).all(|w| w[0].start < w[1].start));
+        let doc = parse("Intro.\n\n## :tada:\n\nBody text here.");
+        assert!(doc.sections.is_empty());
+        assert_eq!(doc.title, None);
+        let doc = parse("Intro.\n\n## :tada: Launch\n\nBody text here.");
+        assert_eq!(doc.sections[0].title, "Launch");
+        assert_eq!(doc.tokens[doc.sections[0].start].text, "Launch");
+    }
+
+    #[test]
+    fn setext_heading_title_keeps_its_line_break_as_a_space() {
+        let doc = parse("First line\nSecond line\n===\n\nbody");
+        assert_eq!(doc.sections[0].title, "First line Second line");
+        assert_eq!(doc.title.as_deref(), Some("First line Second line"));
+    }
+
+    #[test]
+    fn list_intro_ignores_code_and_tables() {
+        let doc = parse(
+            "Some prose.\n\n```python\ndef f():\n    return 1\nclass X:\n```\n\n- item one\n- item two\n",
+        );
+        assert_eq!(doc.list_intro(&doc.lists[0]), None);
+        let doc = parse("| key | value |\n|---|---|\n| name | the thing: |\n\n- a\n- b\n");
+        assert_eq!(doc.list_intro(&doc.lists[0]), None);
+        let doc = parse("> Things in the quote:\n\n- a\n- b\n");
+        assert!(doc.list_intro(&doc.lists[0]).is_some());
+    }
+
+    #[test]
+    fn nearest_section_in_outline_skips_the_title() {
+        let doc = parse(
+            "# Meeting notes\n\n## Monday\n\nalpha beta gamma delta epsilon zeta eta theta.\n\n## Tuesday\n\nmore words here and here.",
+        );
+        assert_eq!(doc.outline(), 1..3);
+        // The title at 0 and Monday at 2 tie for word 1; only the outline counts.
+        assert_eq!(doc.nearest_section(1, 3), Some(0));
+        assert_eq!(doc.nearest_section_in(doc.outline(), 1, 3), Some(1));
+        assert_eq!(doc.nearest_section_in(doc.outline(), 7, 3), None);
     }
 }

@@ -648,7 +648,8 @@ input[type="range"]:focus-visible { outline: 1px solid var(--accent); outline-of
   top: calc(50% + var(--word-size) * 1.0);
   left: 1.25rem;
   right: 1.25rem;
-  max-height: 32%;
+  /* Never past the hint above the dock, whatever the word size. */
+  max-height: min(32%, calc(50% - var(--word-size) - 2.4rem));
   /* Long sentences scroll instead of being cut off; the reader keeps the marked word in view. */
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -739,8 +740,8 @@ input[type="range"]:focus-visible { outline: 1px solid var(--accent); outline-of
   top: 0.75rem;
   left: 1rem;
   right: 1rem;
-  /* Stays above the upper guide tick, which sits at 50% - 0.8 word sizes. */
-  max-height: calc(50% - var(--word-size) * 1.15);
+  /* Ends 0.5rem above the upper guide tick, which sits at 50% - 0.8 word sizes. */
+  max-height: calc(50% - var(--word-size) * 0.8 - 1.25rem);
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: none;
@@ -864,7 +865,7 @@ button.play:active { background: transparent; color: var(--accent); }
   .buttons { grid-area: buttons; }
   .speed { grid-area: speed; }
   .hint { bottom: 0.4rem; }
-  .context { max-height: 24%; }
+  .context { max-height: min(24%, calc(50% - var(--word-size) - 1.9rem)); }
   /* No room above the word on a short landscape phone. */
   .map { display: none; }
 }
@@ -874,13 +875,17 @@ button.play:active { background: transparent; color: var(--accent); }
   /* A stacked list reads as a column, not across the whole stage. */
   .context .intro,
   .context .list { max-width: 40rem; margin-inline: auto; }
+}
+
+/* Wide enough that a big word's first letters cannot reach a rail on the left. */
+@media (min-width: 1000px) {
   /* The outline becomes a top-left rail, clear of the centred word and sentence. */
   .map {
     top: 1rem;
     left: 1.5rem;
     right: auto;
     width: min(16rem, 24vw);
-    /* Ends a little below the word's line, so it never runs into the sentence under it. */
-    max-height: calc(50% + var(--word-size) * 0.9);
+    /* Ends 0.5rem above the sentence or list under the word. */
+    max-height: calc(50% + var(--word-size) - 1.5rem);
   }
 }

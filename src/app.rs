@@ -1,6 +1,6 @@
 //! Browser front end: wires the DOM to the reader state machine.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
@@ -141,6 +141,8 @@ struct App {
     scrub_pointer: bool,
     /// Indices into `doc.sections` shown as outline rows, in order; the title heading is left out.
     map_rows: Vec<usize>,
+    /// The section lit in the outline at the last render, so it scrolls only when that changes.
+    map_now: Cell<Option<usize>>,
 }
 
 /// Dragging the scrub this close to a heading (in words, or in pixels of track) lands on it.
@@ -187,6 +189,7 @@ pub fn run() -> Result<(), JsValue> {
         ticks: Vec::new(),
         scrub_pointer: false,
         map_rows: Vec::new(),
+        map_now: Cell::new(None),
     }));
 
     install_timers(&app);
@@ -615,24 +618,28 @@ impl App {
         let width = self.els.scrub.client_width().max(1) as f64;
         let px_radius = (SNAP_MIN_PX * n.saturating_sub(1) as f64 / width).ceil() as usize;
         let radius = (n / SNAP_RADIUS_DIV).max(SNAP_MIN_RADIUS).max(px_radius);
-        let near = if magnet {
-            self.doc.nearest_section(i, radius)
+        // Only outline headings are magnets, and the two ends of the track always reach the
+        // first and last word.
+        let outline = self.doc.outline();
+        let near = if magnet && i != 0 && i + 1 != n {
+            self.doc.nearest_section_in(outline.clone(), i, radius)
         } else {
             None
         };
-        let outline = self.doc.outline();
         match near {
-            Some(k) if outline.contains(&k) => {
+            Some(k) => {
                 let s = &self.doc.sections[k];
                 // Numbered after the title, so the first real heading is 01.
                 let number = k + 1 - outline.start;
                 let text = format!("{number:02} \u{00B7} {}", s.title.to_uppercase());
                 (s.start, Some(text), true)
             }
-            _ => {
+            None => {
+                // The title is not a section, so a title-only document stays quiet.
                 let text = self
                     .doc
                     .section_at(i)
+                    .filter(|k| outline.contains(k))
                     .map(|k| self.doc.sections[k].title.to_uppercase());
                 (i, text, false)
             }
@@ -874,6 +881,7 @@ impl App {
             let _ = li.append_child(&time);
             let _ = map.append_child(&li);
         }
+        self.map_now.set(None);
         map.set_hidden(self.map_rows.is_empty());
     }
 
@@ -920,10 +928,13 @@ impl App {
                 now = Some(li);
             }
         }
-        // A long outline scrolls; keep the current row about a third of the way down.
-        if let Some(li) = now {
-            let top = li.offset_top() - map.client_height() / 3;
-            map.set_scroll_top(top.max(0));
+        // A long outline scrolls; when the current row changes keep it about a third of the way
+        // down, and otherwise leave the reader's own scrolling alone.
+        if self.map_now.replace(current) != current {
+            if let Some(li) = now {
+                let top = li.offset_top() - map.client_height() / 3;
+                map.set_scroll_top(top.max(0));
+            }
         }
     }
 
@@ -995,20 +1006,21 @@ impl App {
             }
             return;
         }
-        // Paused inside a list (or held there by study mode), the whole list is stacked so the
-        // items read as parallel, not as one run-on sentence. Replays keep the sentence path.
-        if !self.playing {
-            if let Some(list) = self.doc.list_at(self.idx) {
-                self.render_list(ctx, list);
-                return;
-            }
-        }
         // A late tap shows the sentence that resume will replay, then the new one's first words.
         let current = self.doc.sentence_start(self.idx);
         let late = !self.playing && !self.gated && !self.moved_while_paused && {
             let meant = resume::reaction_sentence(&self.doc, self.idx, &|i| self.word_ms_at(i));
             meant < current
         };
+        // Paused inside a list (or held there by study mode), the whole list is stacked so the
+        // items read as parallel, not as one run-on sentence. A late tap keeps the sentence path
+        // so the text resume will replay stays in view; replays keep it too.
+        if !self.playing && !late {
+            if let Some(list) = self.doc.list_at(self.idx) {
+                self.render_list(ctx, list);
+                return;
+            }
+        }
         let (start, end) = if late {
             (self.doc.sentence_start(current - 1), self.idx + 1)
         } else {
