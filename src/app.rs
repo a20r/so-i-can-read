@@ -747,6 +747,8 @@ impl App {
 
     fn show_hint(&mut self, text: &str) {
         self.els.hint.set_text_content(Some(text));
+        // Plain hints are dim; a scrub that snaps to a heading brightens its own afterwards.
+        toggle_class(&self.els.hint, "snap", false);
         let _ = self.els.stage.class_list().add_1("show-hint");
         if let Some(h) = self.hint_timer.take() {
             self.window.clear_timeout_with_handle(h);
