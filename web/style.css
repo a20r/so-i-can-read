@@ -672,6 +672,45 @@ input[type="range"]:focus-visible { outline: 1px solid var(--accent); outline-of
 .stage.replay .context mark { color: var(--fg-2); font-weight: 400; }
 .context mark { background: transparent; color: var(--fg); font-weight: 500; }
 
+/* Paused inside a list: the whole list stacked, left-aligned, marker column and item text. */
+.context .intro {
+  display: block;
+  text-align: left;
+  color: var(--fg-3);
+  margin-bottom: 0.45rem;
+}
+.context .list {
+  display: grid;
+  grid-template-columns: 1.6rem 1fr;
+  column-gap: 0.4rem;
+  row-gap: 0.3rem;
+  text-align: left;
+}
+.context .item { display: contents; }
+.context .item .marker {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: var(--track-1);
+  color: var(--fg-3);
+  padding-top: 0.25rem;
+  /* Nesting indents the marker; depth is capped at 2 so narrow phones keep the column. */
+  padding-left: calc(var(--depth, 0) * 1rem);
+  white-space: nowrap;
+}
+.context .item .text {
+  color: var(--fg-3);
+  padding-left: calc(var(--depth, 0) * 1rem);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.context .item.on .text {
+  color: var(--fg-2);
+  -webkit-line-clamp: unset;
+  display: block;
+}
+
 .context .done {
   display: flex;
   flex-direction: column;
@@ -832,6 +871,9 @@ button.play:active { background: transparent; color: var(--accent); }
 
 @media (min-width: 900px) {
   .dock { max-width: 40rem; width: 100%; margin-left: auto; margin-right: auto; }
+  /* A stacked list reads as a column, not across the whole stage. */
+  .context .intro,
+  .context .list { max-width: 40rem; margin-inline: auto; }
   /* The outline becomes a top-left rail, clear of the centred word and sentence. */
   .map {
     top: 1rem;

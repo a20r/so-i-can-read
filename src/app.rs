@@ -16,7 +16,7 @@ use crate::fetch;
 use crate::input::{classify, Input};
 use crate::resume::{self, PauseKind};
 use crate::settings::Settings;
-use crate::text::{self, Boundary, Document as Doc, Style};
+use crate::text::{self, Boundary, Document as Doc, ListBlock, Style};
 use crate::timing::{self, Pacing};
 
 const SETTINGS_KEY: &str = "sicr.settings";
@@ -993,6 +993,14 @@ impl App {
             }
             return;
         }
+        // Paused inside a list (or held there by study mode), the whole list is stacked so the
+        // items read as parallel, not as one run-on sentence. Replays keep the sentence path.
+        if !self.playing {
+            if let Some(list) = self.doc.list_at(self.idx) {
+                self.render_list(ctx, list);
+                return;
+            }
+        }
         // A late tap shows the sentence that resume will replay, then the new one's first words.
         let current = self.doc.sentence_start(self.idx);
         let late = !self.playing && !self.gated && !self.moved_while_paused && {
@@ -1006,18 +1014,7 @@ impl App {
         };
         let mut marked: Option<Element> = None;
         for i in start..end {
-            let t = &self.doc.tokens[i];
-            // Pieces of a split word are shown joined, without the split hyphen.
-            let piece = if t.glue {
-                t.text.trim_end_matches('-')
-            } else {
-                t.text.as_str()
-            };
-            let text = if i + 1 < end && !t.glue {
-                format!("{piece} ")
-            } else {
-                piece.to_string()
-            };
+            let text = self.context_piece(i, i + 1 == end);
             if i == self.idx {
                 if let Ok(mark) = self.document.create_element("mark") {
                     mark.set_text_content(Some(&text));
@@ -1038,11 +1035,104 @@ impl App {
                 let _ = ctx.append_child(&node);
             }
         }
-        // Long sentences scroll; keep the marked word about a third of the way down.
+        self.scroll_mark_into_view(ctx, marked);
+    }
+
+    /// Text of token `i` for the context box: pieces of a split word are shown joined,
+    /// without the split hyphen, and a space follows every whole word but the last.
+    fn context_piece(&self, i: usize, last: bool) -> String {
+        let t = &self.doc.tokens[i];
+        let piece = if t.glue {
+            t.text.trim_end_matches('-')
+        } else {
+            t.text.as_str()
+        };
+        if last || t.glue {
+            piece.to_string()
+        } else {
+            format!("{piece} ")
+        }
+    }
+
+    /// Long context scrolls; keep the marked word about a third of the way down.
+    fn scroll_mark_into_view(&self, ctx: &HtmlElement, marked: Option<Element>) {
         if let Some(mark) = marked.and_then(|m| m.dyn_into::<HtmlElement>().ok()) {
             let top = mark.offset_top() - ctx.client_height() / 3;
             ctx.set_scroll_top(top.max(0));
         }
+    }
+
+    /// The whole list stacked under the word: an optional intro line, then one row per
+    /// item with a mono marker column and the item text, the current item lit and the
+    /// current word marked. Rows carry `data-idx` so a tap can seek to them.
+    fn render_list(&self, ctx: &HtmlElement, list: &ListBlock) {
+        let current = list.item_at(self.idx);
+        if let Some((s, e)) = self.doc.list_intro(list) {
+            if let Ok(intro) = self.document.create_element("span") {
+                intro.set_class_name("intro");
+                let text: String = (s..e).map(|i| self.context_piece(i, i + 1 == e)).collect();
+                intro.set_text_content(Some(&text));
+                let _ = ctx.append_child(&intro);
+            }
+        }
+        let Ok(stack) = self.document.create_element("div") else {
+            return;
+        };
+        stack.set_class_name("list");
+        let mut marked: Option<Element> = None;
+        for (n, item) in list.items.iter().enumerate() {
+            let (Ok(row), Ok(marker), Ok(text)) = (
+                self.document.create_element("div"),
+                self.document.create_element("span"),
+                self.document.create_element("span"),
+            ) else {
+                continue;
+            };
+            row.set_class_name(if current == Some(n) { "item on" } else { "item" });
+            let _ = row.set_attribute("data-idx", &item.start.to_string());
+            let _ = row.set_attribute("style", &format!("--depth:{}", item.depth.min(2)));
+            marker.set_class_name("marker");
+            let glyph = match (item.task, item.ordered) {
+                (Some(true), _) => "[x]".to_string(),
+                (Some(false), _) => "[ ]".to_string(),
+                (None, true) => format!("{}.", item.number),
+                (None, false) => "\u{2013}".to_string(),
+            };
+            marker.set_text_content(Some(&glyph));
+            text.set_class_name("text");
+            // A parent item's own words: its range minus any nested item inside it.
+            let own: Vec<usize> = (item.start..item.end)
+                .filter(|&i| {
+                    !list
+                        .items
+                        .iter()
+                        .any(|c| c.depth > item.depth && c.start <= i && i < c.end)
+                })
+                .collect();
+            for (k, &i) in own.iter().enumerate() {
+                let piece = self.context_piece(i, k + 1 == own.len());
+                if i == self.idx {
+                    if let Ok(mark) = self.document.create_element("mark") {
+                        mark.set_text_content(Some(&piece));
+                        let _ = text.append_child(&mark);
+                        marked = Some(mark);
+                    }
+                } else {
+                    let _ = text.append_child(&self.document.create_text_node(&piece));
+                }
+            }
+            let _ = row.append_child(&marker);
+            let _ = row.append_child(&text);
+            let _ = stack.append_child(&row);
+        }
+        let _ = ctx.append_child(&stack);
+        self.scroll_mark_into_view(ctx, marked);
+    }
+
+    /// Start index of the list item the reader is on, when inside a list.
+    fn current_item_start(&self) -> Option<usize> {
+        let list = self.doc.list_at(self.idx)?;
+        list.item_at(self.idx).map(|n| list.items[n].start)
     }
 
     fn set_status(&self, msg: &str, is_error: bool) {
@@ -1358,10 +1448,23 @@ fn wire_events(app: &Shared) {
     }
     {
         let app = app.clone();
-        on(&els.stage, "click", move |_| {
+        on(&els.stage, "click", move |e| {
             let mut a = app.borrow_mut();
             if js_sys::Date::now() < a.swallow_click_until {
                 return;
+            }
+            // A tap on another row of a paused list stack moves there without playing.
+            let tapped = e
+                .target()
+                .and_then(|t| t.dyn_into::<Element>().ok())
+                .and_then(|el| el.closest("[data-idx]").ok().flatten())
+                .and_then(|row| row.get_attribute("data-idx"))
+                .and_then(|s| s.parse::<usize>().ok());
+            if let Some(start) = tapped {
+                if a.current_item_start() != Some(start) {
+                    a.seek(start);
+                    return;
+                }
             }
             a.toggle();
         });

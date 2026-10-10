@@ -75,6 +75,38 @@ pub struct Block {
     pub end: usize,
 }
 
+/// One item of a list, as a token range. Nested items sit inside their parent's range.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListItem {
+    pub start: usize,
+    pub end: usize,
+    pub depth: u8,
+    pub ordered: bool,
+    pub number: u64,
+    /// Task-list marker: `Some(true)` for `[x]`, `Some(false)` for `[ ]`.
+    pub task: Option<bool>,
+}
+
+/// A top-level list and every item in it (nested ones included), in document order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListBlock {
+    pub start: usize,
+    pub end: usize,
+    pub items: Vec<ListItem>,
+}
+
+impl ListBlock {
+    /// Index into `items` of the innermost item whose range contains `idx`.
+    pub fn item_at(&self, idx: usize) -> Option<usize> {
+        self.items
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| it.start <= idx && idx < it.end)
+            .max_by_key(|(_, it)| it.depth)
+            .map(|(i, _)| i)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Document {
     pub title: Option<String>,
@@ -83,6 +115,8 @@ pub struct Document {
     pub sections: Vec<Section>,
     /// Top-level lists, tables, code blocks and quotes in document order.
     pub blocks: Vec<Block>,
+    /// The `List` blocks again, with their items; sorted by `start` and non-overlapping.
+    pub lists: Vec<ListBlock>,
 }
 
 impl Document {
@@ -119,6 +153,24 @@ impl Document {
             }
         }
         best.map(|(k, _)| k)
+    }
+
+    /// The list containing token `idx`, if any.
+    pub fn list_at(&self, idx: usize) -> Option<&ListBlock> {
+        let i = self.lists.partition_point(|l| l.start <= idx);
+        let list = self.lists.get(i.checked_sub(1)?)?;
+        (list.end > idx).then_some(list)
+    }
+
+    /// The paragraph that introduces `list` ("Things we are not changing:"), as a token
+    /// range, when the text right before the list ends with a colon and is not itself
+    /// part of a list.
+    pub fn list_intro(&self, list: &ListBlock) -> Option<(usize, usize)> {
+        let last = list.start.checked_sub(1)?;
+        if !self.tokens.get(last)?.text.ends_with(':') || self.list_at(last).is_some() {
+            return None;
+        }
+        Some((self.paragraph_start(last), list.start))
     }
 
     /// Index of the first token of the sentence containing `idx`.
@@ -199,19 +251,24 @@ enum Segment {
     },
     BlockStart(BlockKind),
     BlockEnd,
+    /// A list item opens or closes; items of a nested list sit inside their parent's.
+    ItemStart {
+        depth: u8,
+        ordered: bool,
+        number: u64,
+    },
+    ItemEnd,
+    /// Task-list marker at the start of an item.
+    Task(bool),
 }
 
 /// Parse `input` (markdown or plain text) into a document of display tokens.
 pub fn parse(input: &str) -> Document {
     let cleaned = slack::clean(input);
     let (title, segments) = markdown_segments(&cleaned);
-    let (tokens, sections, blocks) = segments_to_tokens(&segments);
-    Document {
-        title,
-        tokens,
-        sections,
-        blocks,
-    }
+    let mut doc = segments_to_tokens(&segments);
+    doc.title = title;
+    doc
 }
 
 fn markdown_segments(input: &str) -> (Option<String>, Vec<Segment>) {
@@ -230,6 +287,8 @@ fn markdown_segments(input: &str) -> (Option<String>, Vec<Segment>) {
     let mut skip_depth = 0usize;
     // Only the outermost list, table, code block or quote becomes a block.
     let mut block_depth = 0usize;
+    // Open lists, outermost first: (ordered, next item number).
+    let mut list_stack: Vec<(bool, u64)> = Vec::new();
 
     let push_text = |segments: &mut Vec<Segment>, text: &str, style: Style| {
         if text.trim().is_empty() {
@@ -274,10 +333,27 @@ fn markdown_segments(input: &str) -> (Option<String>, Vec<Segment>) {
                     style_stack.push(Style::Code);
                     open_block(&mut segments, &mut block_depth, BlockKind::Code);
                 }
-                Tag::List(_) => {
+                Tag::List(start) => {
                     // A nested list starts a new line inside its parent item.
                     segments.push(Segment::Break(Boundary::Line));
                     open_block(&mut segments, &mut block_depth, BlockKind::List);
+                    list_stack.push((start.is_some(), start.unwrap_or(1)));
+                }
+                Tag::Item => {
+                    let depth = list_stack.len().saturating_sub(1) as u8;
+                    let (ordered, number) = match list_stack.last_mut() {
+                        Some((ordered, next)) => {
+                            let n = *next;
+                            *next += 1;
+                            (*ordered, n)
+                        }
+                        None => (false, 1),
+                    };
+                    segments.push(Segment::ItemStart {
+                        depth,
+                        ordered,
+                        number,
+                    });
                 }
                 Tag::Table(_) => open_block(&mut segments, &mut block_depth, BlockKind::Table),
                 Tag::BlockQuote(_) => open_block(&mut segments, &mut block_depth, BlockKind::Quote),
@@ -313,15 +389,23 @@ fn markdown_segments(input: &str) -> (Option<String>, Vec<Segment>) {
                     segments.push(Segment::Break(Boundary::Paragraph));
                     close_block(&mut segments, &mut block_depth);
                 }
-                TagEnd::BlockQuote(_) | TagEnd::List(_) | TagEnd::Table => {
+                TagEnd::List(_) => {
+                    segments.push(Segment::Break(Boundary::Paragraph));
+                    close_block(&mut segments, &mut block_depth);
+                    list_stack.pop();
+                }
+                TagEnd::BlockQuote(_) | TagEnd::Table => {
                     segments.push(Segment::Break(Boundary::Paragraph));
                     close_block(&mut segments, &mut block_depth);
                 }
                 TagEnd::Paragraph | TagEnd::FootnoteDefinition => {
                     segments.push(Segment::Break(Boundary::Paragraph));
                 }
-                TagEnd::Item
-                | TagEnd::TableRow
+                TagEnd::Item => {
+                    segments.push(Segment::ItemEnd);
+                    segments.push(Segment::Break(Boundary::Line));
+                }
+                TagEnd::TableRow
                 | TagEnd::TableHead
                 | TagEnd::DefinitionListDefinition
                 | TagEnd::DefinitionListTitle => {
@@ -358,7 +442,8 @@ fn markdown_segments(input: &str) -> (Option<String>, Vec<Segment>) {
             Event::SoftBreak => segments.push(Segment::Break(Boundary::Clause)),
             Event::HardBreak => segments.push(Segment::Break(Boundary::Clause)),
             Event::Rule => segments.push(Segment::Break(Boundary::Paragraph)),
-            Event::TaskListMarker(_) | Event::FootnoteReference(_) => {}
+            Event::TaskListMarker(checked) => segments.push(Segment::Task(checked)),
+            Event::FootnoteReference(_) => {}
             Event::Html(_) | Event::InlineHtml(_) => {}
             Event::InlineMath(m) | Event::DisplayMath(m) => push_text(&mut segments, &m, Style::Code),
         }
@@ -380,11 +465,16 @@ fn close_block(segments: &mut Vec<Segment>, depth: &mut usize) {
     }
 }
 
-fn segments_to_tokens(segments: &[Segment]) -> (Vec<Token>, Vec<Section>, Vec<Block>) {
+/// Turn segments into tokens and the document's shape; the title is filled in by the caller.
+fn segments_to_tokens(segments: &[Segment]) -> Document {
     let mut tokens: Vec<Token> = Vec::new();
     let mut sections: Vec<Section> = Vec::new();
     let mut blocks: Vec<Block> = Vec::new();
     let mut open: Option<(BlockKind, usize)> = None;
+    let mut lists: Vec<ListBlock> = Vec::new();
+    let mut open_list: Option<ListBlock> = None;
+    // Items still open, outermost first; a nested item closes before its parent.
+    let mut open_items: Vec<ListItem> = Vec::new();
     // Text runs with different styles can touch without whitespace ("**bold**text"),
     // so we join adjacent runs and split on whitespace afterwards.
     let mut pending = String::new();
@@ -450,6 +540,13 @@ fn segments_to_tokens(segments: &[Segment]) -> (Vec<Token>, Vec<Section>, Vec<Bl
             Segment::BlockStart(kind) => {
                 flush(&mut tokens, &mut pending, pending_style);
                 open = Some((*kind, tokens.len()));
+                if *kind == BlockKind::List {
+                    open_list = Some(ListBlock {
+                        start: tokens.len(),
+                        end: tokens.len(),
+                        items: Vec::new(),
+                    });
+                }
             }
             Segment::BlockEnd => {
                 flush(&mut tokens, &mut pending, pending_style);
@@ -458,6 +555,46 @@ fn segments_to_tokens(segments: &[Segment]) -> (Vec<Token>, Vec<Section>, Vec<Bl
                     if end > start {
                         blocks.push(Block { kind, start, end });
                     }
+                }
+                open_items.clear();
+                if let Some(mut list) = open_list.take() {
+                    list.end = tokens.len();
+                    list.items.retain(|it| it.start < it.end);
+                    // Nested items were closed (and pushed) before their parents.
+                    list.items.sort_by_key(|it| (it.start, it.depth));
+                    if !list.items.is_empty() {
+                        lists.push(list);
+                    }
+                }
+            }
+            // Items only count inside a list block; a list nested in a quote is part of the quote.
+            Segment::ItemStart {
+                depth,
+                ordered,
+                number,
+            } => {
+                flush(&mut tokens, &mut pending, pending_style);
+                if open_list.is_some() {
+                    open_items.push(ListItem {
+                        start: tokens.len(),
+                        end: tokens.len(),
+                        depth: *depth,
+                        ordered: *ordered,
+                        number: *number,
+                        task: None,
+                    });
+                }
+            }
+            Segment::Task(checked) => {
+                if let Some(item) = open_items.last_mut() {
+                    item.task = Some(*checked);
+                }
+            }
+            Segment::ItemEnd => {
+                flush(&mut tokens, &mut pending, pending_style);
+                if let (Some(mut item), Some(list)) = (open_items.pop(), open_list.as_mut()) {
+                    item.end = tokens.len();
+                    list.items.push(item);
                 }
             }
         }
@@ -468,7 +605,13 @@ fn segments_to_tokens(segments: &[Segment]) -> (Vec<Token>, Vec<Section>, Vec<Bl
     }
     // A heading with no words after it would point past the end.
     sections.retain(|s| s.start < tokens.len());
-    (tokens, sections, blocks)
+    Document {
+        title: None,
+        tokens,
+        sections,
+        blocks,
+        lists,
+    }
 }
 
 fn push_word(tokens: &mut Vec<Token>, word: &str, style: Style) {
@@ -922,5 +1065,120 @@ Does the 15% stickiness margin hold at night, when there are fewer orders and a 
         assert_eq!(doc.tokens[1].style, Style::Strong);
         assert_eq!(doc.tokens[3].style, Style::Emphasis);
         assert_eq!(doc.tokens[4].style, Style::Normal);
+    }
+
+    /// The list-bearing part of the structured test document.
+    const LISTS_DOC: &str = "## Proposed changes\n\n\
+        1. Make plans sticky for robots that are already loading, so a reroute needs a 15% gain to go through.\n\
+        2. Price slack explicitly in the objective, using the `p1/p2` ratio from the traffic model.\n\
+        3. Run the dispatcher every 60 seconds during peak and every 180 seconds off peak.\n\n\
+        Things we are not changing:\n\n\
+        - The routing engine itself.\n\
+        - The battery model, which is good enough.\n\
+        - The depot layout.\n\n\
+        ## How the pricing term works\n\nThe term is a single line.\n";
+
+    #[test]
+    fn lists_are_found_with_items_and_numbers() {
+        let doc = parse(LISTS_DOC);
+        assert_eq!(doc.lists.len(), 2);
+        let numbered = &doc.lists[0];
+        assert_eq!(numbered.items.len(), 3);
+        assert!(numbered
+            .items
+            .iter()
+            .all(|it| it.ordered && it.depth == 0 && it.task.is_none()));
+        let numbers: Vec<u64> = numbered.items.iter().map(|it| it.number).collect();
+        assert_eq!(numbers, vec![1, 2, 3]);
+        assert_eq!(doc.tokens[numbered.start].text, "Make");
+        assert_eq!(doc.tokens[numbered.end - 1].text, "peak.");
+        let bullets = &doc.lists[1];
+        assert_eq!(bullets.items.len(), 3);
+        assert!(bullets.items.iter().all(|it| !it.ordered));
+        assert_eq!(doc.tokens[bullets.items[2].start].text, "The");
+        assert_eq!(doc.tokens[bullets.items[2].end - 1].text, "layout.");
+        // Items tile the list exactly.
+        assert_eq!(bullets.items[0].start, bullets.start);
+        assert_eq!(bullets.items[0].end, bullets.items[1].start);
+        assert_eq!(bullets.items[2].end, bullets.end);
+    }
+
+    #[test]
+    fn lists_and_list_blocks_agree() {
+        for input in [STRUCTURED, LISTS_DOC, "- a\n  - b\n- c\n\n> - quoted\n\n1. one"] {
+            let doc = parse(input);
+            let from_blocks: Vec<(usize, usize)> = doc
+                .blocks
+                .iter()
+                .filter(|b| b.kind == BlockKind::List)
+                .map(|b| (b.start, b.end))
+                .collect();
+            let from_lists: Vec<(usize, usize)> = doc.lists.iter().map(|l| (l.start, l.end)).collect();
+            assert_eq!(from_blocks, from_lists, "{input}");
+        }
+        // A list inside a quote belongs to the quote, so it is not a list of its own.
+        let doc = parse("> - quoted\n> - lines\n\nafter");
+        assert_eq!(doc.blocks.len(), 1);
+        assert_eq!(doc.blocks[0].kind, BlockKind::Quote);
+        assert!(doc.lists.is_empty());
+    }
+
+    #[test]
+    fn list_at_and_item_at() {
+        let doc = parse(LISTS_DOC);
+        let battery = doc.tokens.iter().position(|t| t.text == "battery").unwrap();
+        let list = doc.list_at(battery).expect("battery is in a list");
+        assert_eq!(list, &doc.lists[1]);
+        assert_eq!(list.item_at(battery), Some(1));
+        // Heading, intro paragraph and the paragraph after are not in a list.
+        assert!(doc.list_at(0).is_none());
+        let changing = doc.tokens.iter().position(|t| t.text == "changing:").unwrap();
+        assert!(doc.list_at(changing).is_none());
+        assert!(doc.list_at(doc.tokens.len() - 1).is_none());
+        assert!(doc.list_at(doc.lists[0].end).is_none());
+        assert!(doc.list_at(doc.lists[0].end - 1).is_some());
+    }
+
+    #[test]
+    fn list_intro_only_for_colon_paragraph() {
+        let doc = parse(LISTS_DOC);
+        assert_eq!(doc.list_intro(&doc.lists[0]), None);
+        let (s, e) = doc.list_intro(&doc.lists[1]).expect("bullets have an intro");
+        let intro: Vec<&str> = doc.tokens[s..e].iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(intro, vec!["Things", "we", "are", "not", "changing:"]);
+        let first = parse("- a\n- b\n");
+        assert_eq!(first.list_intro(&first.lists[0]), None);
+        // An item ending in a colon does not introduce the list that follows it.
+        let back_to_back = parse("- first list ends with:\n\n\nplain\n\n1. second");
+        let last = back_to_back.lists.last().unwrap();
+        assert_eq!(back_to_back.list_intro(last), None);
+    }
+
+    #[test]
+    fn nested_items_have_depth_and_innermost_wins() {
+        let doc = parse("- one\n- two\n  - nested under two\n- three\n");
+        assert_eq!(doc.lists.len(), 1);
+        let list = &doc.lists[0];
+        let depths: Vec<u8> = list.items.iter().map(|it| it.depth).collect();
+        assert_eq!(depths, vec![0, 0, 1, 0]);
+        let nested = doc.tokens.iter().position(|t| t.text == "nested").unwrap();
+        assert_eq!(list.item_at(nested), Some(2));
+        // The parent item's range spans its child.
+        assert!(list.items[1].start < nested && nested < list.items[1].end);
+        let two = doc.tokens.iter().position(|t| t.text == "two").unwrap();
+        assert_eq!(list.item_at(two), Some(1));
+        let three = doc.tokens.iter().position(|t| t.text == "three").unwrap();
+        assert_eq!(list.item_at(three), Some(3));
+    }
+
+    #[test]
+    fn task_markers_are_kept() {
+        let doc = parse("- [x] shipped it\n- [ ] not yet\n- plain\n");
+        let items = &doc.lists[0].items;
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].task, Some(true));
+        assert_eq!(items[1].task, Some(false));
+        assert_eq!(items[2].task, None);
+        assert_eq!(doc.tokens[items[0].start].text, "shipped");
     }
 }
