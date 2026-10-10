@@ -73,6 +73,7 @@ struct Els {
     context: HtmlElement,
     hint: HtmlElement,
     scrub: HtmlInputElement,
+    landmarks: HtmlElement,
     restart_btn: HtmlElement,
     prev_sent_btn: HtmlElement,
     prev_word_btn: HtmlElement,
@@ -133,7 +134,16 @@ struct App {
     swipe_start: Option<(f64, f64, f64)>,
     /// A swipe just ended; ignore the click the browser may send after it.
     swallow_click_until: f64,
+    /// Heading ticks on the scrub track, by section index, so the current one can be lit.
+    ticks: Vec<(usize, Element)>,
+    /// A finger or mouse button is down on the scrub track.
+    scrub_pointer: bool,
 }
+
+/// Dragging the scrub this close to a heading (in words, or in pixels of track) lands on it.
+const SNAP_MIN_RADIUS: usize = 3;
+const SNAP_RADIUS_DIV: usize = 150;
+const SNAP_MIN_PX: f64 = 6.0;
 
 pub fn run() -> Result<(), JsValue> {
     let window = web_sys::window().ok_or("no window")?;
@@ -171,6 +181,8 @@ pub fn run() -> Result<(), JsValue> {
         gated: false,
         swipe_start: None,
         swallow_click_until: 0.0,
+        ticks: Vec::new(),
+        scrub_pointer: false,
     }));
 
     install_timers(&app);
@@ -227,6 +239,7 @@ impl Els {
             context: get(document, "context")?,
             hint: get(document, "hint")?,
             scrub: get(document, "scrub")?,
+            landmarks: get(document, "landmarks")?,
             restart_btn: get(document, "restart-btn")?,
             prev_sent_btn: get(document, "prev-sent-btn")?,
             prev_word_btn: get(document, "prev-word-btn")?,
@@ -409,6 +422,7 @@ impl App {
         self.els
             .scrub
             .set_max(&self.doc.tokens.len().saturating_sub(1).to_string());
+        self.build_landmarks();
         self.els.home.set_hidden(true);
         self.els.reader.set_hidden(false);
         let _ = self.els.stage.focus();
@@ -538,6 +552,82 @@ impl App {
         self.render();
         let ms = START_DELAY_MS / 2.0 + self.current_duration();
         self.schedule(ms);
+    }
+
+    /// Lay the document's shape over the scrub track: a tick per heading, a dash per block.
+    fn build_landmarks(&mut self) {
+        self.els.landmarks.set_inner_html("");
+        self.ticks.clear();
+        let n = self.doc.tokens.len();
+        if n < 2 {
+            return;
+        }
+        // The same mapping as the progress fill, so the fill head lands on a tick at a heading.
+        let x = |i: usize| i as f64 / (n - 1) as f64 * 100.0;
+        for (k, s) in self.doc.sections.iter().enumerate() {
+            // The title at the very start needs no tick.
+            if s.start == 0 {
+                continue;
+            }
+            if let Ok(el) = self.document.create_element("i") {
+                let _ = el.set_attribute("data-s", &k.to_string());
+                let _ = el.set_attribute("style", &format!("--x:{:.3}%", x(s.start)));
+                if s.level <= 2 {
+                    el.set_class_name("lvl1");
+                }
+                let _ = self.els.landmarks.append_child(&el);
+                self.ticks.push((k, el));
+            }
+        }
+        for b in &self.doc.blocks {
+            if let Ok(el) = self.document.create_element("b") {
+                let (x0, x1) = (x(b.start), x(b.end - 1));
+                let _ = el.set_attribute("style", &format!("--x:{x0:.3}%; --w:{:.3}%", x1 - x0));
+                let _ = self.els.landmarks.append_child(&el);
+            }
+        }
+    }
+
+    /// Scrub input: a drag that ends near a heading lands on it. Keyboard steps of one
+    /// word never snap; a finger on the track always feels the magnet.
+    fn scrub_to(&mut self, i: usize) {
+        let step = i.abs_diff(self.idx) == 1 && !self.scrub_pointer;
+        let (target, text, snap) = self.landmark_at(i, !step);
+        self.seek(target);
+        if let Some(text) = text {
+            self.show_hint(&text);
+        }
+        toggle_class(&self.els.hint, "snap", snap);
+    }
+
+    /// Where a scrub to `i` lands, what the hint says there and whether it is a snap.
+    fn landmark_at(&self, i: usize, magnet: bool) -> (usize, Option<String>, bool) {
+        let n = self.doc.tokens.len();
+        // At least a few words, and at least a few pixels of track on a long document.
+        let width = self.els.scrub.client_width().max(1) as f64;
+        let px_radius = (SNAP_MIN_PX * n.saturating_sub(1) as f64 / width).ceil() as usize;
+        let radius = (n / SNAP_RADIUS_DIV).max(SNAP_MIN_RADIUS).max(px_radius);
+        let near = if magnet {
+            self.doc.nearest_section(i, radius)
+        } else {
+            None
+        };
+        match near {
+            Some(k) if self.doc.sections[k].start > 0 => {
+                let s = &self.doc.sections[k];
+                // Numbered after the title, so the first real heading is 01.
+                let number = k + 1 - usize::from(self.doc.sections[0].start == 0);
+                let text = format!("{number:02} \u{00B7} {}", s.title.to_uppercase());
+                (s.start, Some(text), true)
+            }
+            _ => {
+                let text = self
+                    .doc
+                    .section_at(i)
+                    .map(|k| self.doc.sections[k].title.to_uppercase());
+                (i, text, false)
+            }
+        }
     }
 
     fn seek(&mut self, idx: usize) {
@@ -720,6 +810,10 @@ impl App {
         );
         self.els.scrub.set_value(&self.idx.to_string());
         set_range_fill(&self.els.scrub);
+        let section = self.doc.section_at(self.idx);
+        for (k, tick) in &self.ticks {
+            toggle_class(tick, "now", Some(*k) == section);
+        }
         let progress = if self.doc.tokens.len() > 1 {
             self.idx as f64 / (self.doc.tokens.len() - 1) as f64
         } else {
@@ -1261,7 +1355,44 @@ fn wire_events(app: &Shared) {
             let mut a = app.borrow_mut();
             let i = a.els.scrub.value().parse::<usize>().unwrap_or(0);
             a.pause();
-            a.seek(i);
+            a.scrub_to(i);
+        });
+    }
+    {
+        let app = app.clone();
+        on(&els.scrub, "pointerdown", move |_| {
+            app.borrow_mut().scrub_pointer = true;
+        });
+    }
+    for event in ["pointerup", "pointercancel"] {
+        let app = app.clone();
+        on(&a.window, event, move |_| {
+            app.borrow_mut().scrub_pointer = false;
+        });
+    }
+    {
+        // Hovering the track names the section under the pointer without moving.
+        let app = app.clone();
+        on(&els.scrub, "pointermove", move |e| {
+            let Some(pe) = e.dyn_ref::<PointerEvent>() else {
+                return;
+            };
+            if pe.buttons() != 0 || pe.pointer_type() != "mouse" {
+                return;
+            }
+            let mut a = app.borrow_mut();
+            let n = a.doc.tokens.len();
+            let width = a.els.scrub.client_width();
+            if n < 2 || width <= 0 {
+                return;
+            }
+            let frac = (pe.offset_x() as f64 / width as f64).clamp(0.0, 1.0);
+            let i = (frac * (n - 1) as f64).round() as usize;
+            let (_, text, snap) = a.landmark_at(i, true);
+            if let Some(text) = text {
+                a.show_hint(&text);
+            }
+            toggle_class(&a.els.hint, "snap", snap);
         });
     }
     {

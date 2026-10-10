@@ -127,7 +127,10 @@
     </div>
 
     <div class="dock">
-      <input id="scrub" class="scrub" type="range" min="0" max="0" value="0" aria-label="Position">
+      <div class="scrub-wrap">
+        <div id="landmarks" class="landmarks" aria-hidden="true"></div>
+        <input id="scrub" class="scrub" type="range" min="0" max="0" value="0" aria-label="Position">
+      </div>
       <div class="buttons">
         <button id="restart-btn" class="icon restart" type="button" aria-label="Restart">&#x21BA;</button>
         <button id="prev-sent-btn" class="icon" type="button" aria-label="Previous sentence">&#x2039;&#x2039;</button>

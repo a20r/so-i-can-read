@@ -50,13 +50,63 @@ impl Token {
     }
 }
 
+/// A heading and the index of its first token; the shape of the document for scrubbing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Section {
+    pub title: String,
+    pub level: u8,
+    pub start: usize,
+}
+
+/// Kinds of heavy block worth seeing on a map of the document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockKind {
+    List,
+    Table,
+    Code,
+    Quote,
+}
+
+/// A top-level block spanning tokens `start..end`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Block {
+    pub kind: BlockKind,
+    pub start: usize,
+    pub end: usize,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Document {
     pub title: Option<String>,
     pub tokens: Vec<Token>,
+    /// Headings in document order, with ascending `start`.
+    pub sections: Vec<Section>,
+    /// Top-level lists, tables, code blocks and quotes in document order.
+    pub blocks: Vec<Block>,
 }
 
 impl Document {
+    /// Index into `sections` of the section containing `idx`, if any heading precedes it.
+    pub fn section_at(&self, idx: usize) -> Option<usize> {
+        self.sections.partition_point(|s| s.start <= idx).checked_sub(1)
+    }
+
+    /// The section whose start lies within `radius` tokens of `idx`; ties go to the earlier one.
+    pub fn nearest_section(&self, idx: usize, radius: usize) -> Option<usize> {
+        let after = self.sections.partition_point(|s| s.start <= idx);
+        let mut best: Option<(usize, usize)> = None;
+        for k in after.checked_sub(1).into_iter().chain(Some(after)) {
+            let Some(s) = self.sections.get(k) else {
+                continue;
+            };
+            let d = s.start.abs_diff(idx);
+            if d <= radius && best.is_none_or(|(_, bd)| d < bd) {
+                best = Some((k, d));
+            }
+        }
+        best.map(|(k, _)| k)
+    }
+
     /// Index of the first token of the sentence containing `idx`.
     pub fn sentence_start(&self, idx: usize) -> usize {
         let idx = idx.min(self.tokens.len().saturating_sub(1));
@@ -123,16 +173,31 @@ const SPLIT_LEN: usize = 11;
 /// A run of text with a single style; paragraph breaks are separate segments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Segment {
-    Text { text: String, style: Style },
+    Text {
+        text: String,
+        style: Style,
+    },
     Break(Boundary),
+    /// A heading starts here; the title is filled in once its text has been seen.
+    Section {
+        level: u8,
+        title: String,
+    },
+    BlockStart(BlockKind),
+    BlockEnd,
 }
 
 /// Parse `input` (markdown or plain text) into a document of display tokens.
 pub fn parse(input: &str) -> Document {
     let cleaned = slack::clean(input);
     let (title, segments) = markdown_segments(&cleaned);
-    let tokens = segments_to_tokens(&segments);
-    Document { title, tokens }
+    let (tokens, sections, blocks) = segments_to_tokens(&segments);
+    Document {
+        title,
+        tokens,
+        sections,
+        blocks,
+    }
 }
 
 fn markdown_segments(input: &str) -> (Option<String>, Vec<Segment>) {
@@ -147,7 +212,10 @@ fn markdown_segments(input: &str) -> (Option<String>, Vec<Segment>) {
     let mut style_stack: Vec<Style> = vec![Style::Normal];
     let mut title: Option<String> = None;
     let mut heading_buf: Option<String> = None;
+    let mut section_idx: Option<usize> = None;
     let mut skip_depth = 0usize;
+    // Only the outermost list, table, code block or quote becomes a block.
+    let mut block_depth = 0usize;
 
     let push_text = |segments: &mut Vec<Segment>, text: &str, style: Style| {
         if text.trim().is_empty() {
@@ -177,13 +245,28 @@ fn markdown_segments(input: &str) -> (Option<String>, Vec<Segment>) {
         let style = *style_stack.last().unwrap_or(&Style::Normal);
         match event {
             Event::Start(tag) => match tag {
-                Tag::Heading { .. } => {
+                Tag::Heading { level, .. } => {
                     style_stack.push(Style::Heading);
                     heading_buf = Some(String::new());
+                    section_idx = Some(segments.len());
+                    segments.push(Segment::Section {
+                        level: level as u8,
+                        title: String::new(),
+                    });
                 }
                 Tag::Strong => style_stack.push(Style::Strong),
                 Tag::Emphasis => style_stack.push(Style::Emphasis),
-                Tag::CodeBlock(_) => style_stack.push(Style::Code),
+                Tag::CodeBlock(_) => {
+                    style_stack.push(Style::Code);
+                    open_block(&mut segments, &mut block_depth, BlockKind::Code);
+                }
+                Tag::List(_) => {
+                    // A nested list starts a new line inside its parent item.
+                    segments.push(Segment::Break(Boundary::Line));
+                    open_block(&mut segments, &mut block_depth, BlockKind::List);
+                }
+                Tag::Table(_) => open_block(&mut segments, &mut block_depth, BlockKind::Table),
+                Tag::BlockQuote(_) => open_block(&mut segments, &mut block_depth, BlockKind::Quote),
                 Tag::Image { .. } => {
                     // Alt text is the only readable part of an image.
                     style_stack.push(Style::Emphasis);
@@ -197,6 +280,11 @@ fn markdown_segments(input: &str) -> (Option<String>, Vec<Segment>) {
                     style_stack.pop();
                     if let Some(h) = heading_buf.take() {
                         let h = h.trim().to_string();
+                        if let Some(Segment::Section { title: t, .. }) =
+                            section_idx.take().and_then(|i| segments.get_mut(i))
+                        {
+                            t.clone_from(&h);
+                        }
                         if title.is_none() && !h.is_empty() {
                             title = Some(h);
                         }
@@ -209,8 +297,13 @@ fn markdown_segments(input: &str) -> (Option<String>, Vec<Segment>) {
                 TagEnd::CodeBlock => {
                     style_stack.pop();
                     segments.push(Segment::Break(Boundary::Paragraph));
+                    close_block(&mut segments, &mut block_depth);
                 }
-                TagEnd::Paragraph | TagEnd::BlockQuote(_) | TagEnd::List(_) | TagEnd::FootnoteDefinition => {
+                TagEnd::BlockQuote(_) | TagEnd::List(_) | TagEnd::Table => {
+                    segments.push(Segment::Break(Boundary::Paragraph));
+                    close_block(&mut segments, &mut block_depth);
+                }
+                TagEnd::Paragraph | TagEnd::FootnoteDefinition => {
                     segments.push(Segment::Break(Boundary::Paragraph));
                 }
                 TagEnd::Item
@@ -259,8 +352,25 @@ fn markdown_segments(input: &str) -> (Option<String>, Vec<Segment>) {
     (title, segments)
 }
 
-fn segments_to_tokens(segments: &[Segment]) -> Vec<Token> {
+fn open_block(segments: &mut Vec<Segment>, depth: &mut usize, kind: BlockKind) {
+    *depth += 1;
+    if *depth == 1 {
+        segments.push(Segment::BlockStart(kind));
+    }
+}
+
+fn close_block(segments: &mut Vec<Segment>, depth: &mut usize) {
+    *depth = depth.saturating_sub(1);
+    if *depth == 0 {
+        segments.push(Segment::BlockEnd);
+    }
+}
+
+fn segments_to_tokens(segments: &[Segment]) -> (Vec<Token>, Vec<Section>, Vec<Block>) {
     let mut tokens: Vec<Token> = Vec::new();
+    let mut sections: Vec<Section> = Vec::new();
+    let mut blocks: Vec<Block> = Vec::new();
+    let mut open: Option<(BlockKind, usize)> = None;
     // Text runs with different styles can touch without whitespace ("**bold**text"),
     // so we join adjacent runs and split on whitespace afterwards.
     let mut pending = String::new();
@@ -298,13 +408,36 @@ fn segments_to_tokens(segments: &[Segment]) -> Vec<Token> {
                     }
                 }
             }
+            Segment::Section { level, title } => {
+                flush(&mut tokens, &mut pending, pending_style);
+                if !title.is_empty() {
+                    sections.push(Section {
+                        title: title.clone(),
+                        level: *level,
+                        start: tokens.len(),
+                    });
+                }
+            }
+            Segment::BlockStart(kind) => {
+                flush(&mut tokens, &mut pending, pending_style);
+                open = Some((*kind, tokens.len()));
+            }
+            Segment::BlockEnd => {
+                flush(&mut tokens, &mut pending, pending_style);
+                if let Some((kind, start)) = open.take() {
+                    let end = tokens.len();
+                    if end > start {
+                        blocks.push(Block { kind, start, end });
+                    }
+                }
+            }
         }
     }
     flush(&mut tokens, &mut pending, pending_style);
     if let Some(last) = tokens.last_mut() {
         last.boundary = Boundary::Paragraph;
     }
-    tokens
+    (tokens, sections, blocks)
 }
 
 fn push_word(tokens: &mut Vec<Token>, word: &str, style: Style) {
@@ -549,5 +682,162 @@ mod tests {
     fn empty_input() {
         let doc = parse("   \n\n  ");
         assert!(doc.tokens.is_empty());
+        assert!(doc.sections.is_empty());
+        assert!(doc.blocks.is_empty());
+    }
+
+    /// A document with every structure the reader maps: headings, a table, a quote,
+    /// both kinds of list and a code block.
+    const STRUCTURED: &str = r##"# Fleet scheduling notes
+
+A short design note on how the dispatcher assigns robots to delivery routes. It is written to be read quickly, but it has the shape of a real document: sections, lists, a table, and some code.
+
+## Background
+
+The current dispatcher runs every **90 seconds**. Each run looks at the open orders, the idle robots and the traffic model, then produces a plan. Plans are *not* sticky: a later run can reassign a robot that has not yet left the depot.
+
+Two problems came up in the last review. First, the plan changes too often during the morning peak, which wastes battery on reroutes. Second, when slack is low the marginal robot hour is about twice as productive as when slack is high, and the dispatcher does not know this.
+
+## What we measured
+
+| Metric | Low slack | High slack |
+| --- | --- | --- |
+| Deliveries per robot hour | 4.1 | 2.2 |
+| Reroutes per hour | 11 | 3 |
+| Idle time | 6% | 31% |
+
+> The threshold for degradation is sharp. Below about 0.8 the fleet is fine; above 1.1 it falls apart within two cycles.
+
+## Proposed changes
+
+1. Make plans sticky for robots that are already loading, so a reroute needs a 15% gain to go through.
+2. Price slack explicitly in the objective, using the `p1/p2` ratio from the traffic model.
+3. Run the dispatcher every 60 seconds during peak and every 180 seconds off peak.
+
+Things we are not changing:
+
+- The routing engine itself.
+- The battery model, which is good enough.
+- The depot layout.
+
+## How the pricing term works
+
+The term is a single line in the objective. It penalises assignments that push slack above the threshold:
+
+```rust
+fn slack_penalty(slack: f64, threshold: f64) -> f64 {
+    if slack <= threshold {
+        0.0
+    } else {
+        (slack - threshold).powi(2) * WEIGHT
+    }
+}
+```
+
+The weight was fitted on three weeks of data. See `dispatch/objective.rs` for the full function and the [original proposal](https://example.com/proposal) for the derivation.
+
+## Open questions
+
+Does the 15% stickiness margin hold at night, when there are fewer orders and a single reroute matters more? And should the threshold be learned per depot rather than fixed for the whole fleet? We will know more after the pilot, which runs for two weeks starting Monday.
+"##;
+
+    #[test]
+    fn structured_doc_sections() {
+        let doc = parse(STRUCTURED);
+        let titles: Vec<&str> = doc.sections.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec![
+                "Fleet scheduling notes",
+                "Background",
+                "What we measured",
+                "Proposed changes",
+                "How the pricing term works",
+                "Open questions",
+            ]
+        );
+        let levels: Vec<u8> = doc.sections.iter().map(|s| s.level).collect();
+        assert_eq!(levels, vec![1, 2, 2, 2, 2, 2]);
+        assert_eq!(doc.sections[0].start, 0);
+        for pair in doc.sections.windows(2) {
+            assert!(pair[0].start < pair[1].start);
+        }
+        // Each section starts on the first word of its heading.
+        for s in &doc.sections {
+            let t = &doc.tokens[s.start];
+            assert_eq!(t.style, Style::Heading);
+            assert!(s.title.starts_with(&t.text), "{} vs {}", s.title, t.text);
+        }
+        assert_eq!(doc.section_at(0), Some(0));
+        assert_eq!(doc.section_at(doc.sections[3].start + 5), Some(3));
+        assert_eq!(doc.section_at(doc.tokens.len() - 1), Some(5));
+    }
+
+    #[test]
+    fn structured_doc_blocks() {
+        let doc = parse(STRUCTURED);
+        let kinds: Vec<BlockKind> = doc.blocks.iter().map(|b| b.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                BlockKind::Table,
+                BlockKind::Quote,
+                BlockKind::List,
+                BlockKind::List,
+                BlockKind::Code,
+            ]
+        );
+        let table = &doc.blocks[0];
+        assert_eq!(doc.tokens[table.start].text, "Metric");
+        assert_eq!(doc.tokens[table.end - 1].text, "31%");
+        assert_eq!(doc.tokens[table.end - 1].boundary, Boundary::Paragraph);
+        let quote = &doc.blocks[1];
+        assert_eq!(doc.tokens[quote.start].text, "The");
+        assert_eq!(doc.tokens[quote.end - 1].text, "cycles.");
+        let numbered = &doc.blocks[2];
+        assert_eq!(doc.tokens[numbered.start].text, "Make");
+        assert_eq!(doc.tokens[numbered.end - 1].text, "peak.");
+        let code = &doc.blocks[4];
+        assert_eq!(doc.tokens[code.start].text, "fn");
+        assert_eq!(doc.tokens[code.end - 1].text, "}");
+        assert!(doc.tokens[code.start..code.end]
+            .iter()
+            .all(|t| t.style == Style::Code));
+        for pair in doc.blocks.windows(2) {
+            assert!(pair[0].end <= pair[1].start);
+        }
+        // Blocks sit inside the sections they belong to.
+        assert_eq!(doc.section_at(table.start), Some(2));
+        assert_eq!(doc.section_at(code.start), Some(4));
+    }
+
+    #[test]
+    fn nested_list_is_one_block() {
+        let doc = parse("intro\n\n- a\n  - b\n  - c\n- d\n\nafter");
+        assert_eq!(doc.blocks.len(), 1);
+        let b = &doc.blocks[0];
+        assert_eq!(b.kind, BlockKind::List);
+        assert_eq!(&words(&doc)[b.start..b.end], &["a", "b", "c", "d"]);
+        assert!(doc.sections.is_empty());
+    }
+
+    #[test]
+    fn nearest_section_snaps_within_radius() {
+        let doc = parse("# T\n\nalpha beta gamma.\n\n## A\n\nx y z.\n\n## B\n\nq.\n");
+        let starts: Vec<usize> = doc.sections.iter().map(|s| s.start).collect();
+        assert_eq!(starts, vec![0, 4, 8]);
+        assert_eq!(doc.nearest_section(4, 0), Some(1));
+        assert_eq!(doc.nearest_section(5, 1), Some(1));
+        assert_eq!(doc.nearest_section(7, 2), Some(2));
+        // Equidistant: the earlier section wins.
+        assert_eq!(doc.nearest_section(6, 2), Some(1));
+        assert_eq!(doc.nearest_section(6, 1), None);
+        assert_eq!(doc.nearest_section(2, 1), None);
+        assert_eq!(doc.nearest_section(9, 3), Some(2));
+        assert_eq!(doc.section_at(3), Some(0));
+        assert_eq!(doc.section_at(6), Some(1));
+        let plain = parse("no headings here at all.");
+        assert_eq!(plain.section_at(2), None);
+        assert_eq!(plain.nearest_section(0, 10), None);
     }
 }
