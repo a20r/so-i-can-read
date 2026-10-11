@@ -101,7 +101,7 @@
     <footer class="home-footer">
       <p>
         <kbd>space</kbd> play <kbd>&larr;</kbd><kbd>&rarr;</kbd> word <kbd>shift</kbd>+<kbd>&larr;</kbd><kbd>&rarr;</kbd> sentence
-        <kbd>&uarr;</kbd><kbd>&darr;</kbd> speed <kbd>backspace</kbd> replay sentence <kbd>esc</kbd> back
+        <kbd>&uarr;</kbd><kbd>&darr;</kbd> speed <kbd>backspace</kbd> replay sentence <kbd>1</kbd>&ndash;<kbd>9</kbd> section <kbd>esc</kbd> back
       </p>
       <p><code>?url=</code> or <code>?text=</code> opens straight into the reader</p>
     </footer>
@@ -119,6 +119,7 @@
     </header>
 
     <div id="stage" class="stage" role="button" tabindex="0" aria-label="Tap to play or pause">
+      <ol id="map" class="map label" aria-label="Sections" hidden></ol>
       <div id="word" class="word">
         <span id="word-before" class="before"></span><span id="word-pivot" class="pivot"></span><span id="word-after" class="after"></span>
       </div>
@@ -127,7 +128,10 @@
     </div>
 
     <div class="dock">
-      <input id="scrub" class="scrub" type="range" min="0" max="0" value="0" aria-label="Position">
+      <div class="scrub-wrap">
+        <div id="landmarks" class="landmarks" aria-hidden="true"></div>
+        <input id="scrub" class="scrub" type="range" min="0" max="0" value="0" aria-label="Position">
+      </div>
       <div class="buttons">
         <button id="restart-btn" class="icon restart" type="button" aria-label="Restart">&#x21BA;</button>
         <button id="prev-sent-btn" class="icon" type="button" aria-label="Previous sentence">&#x2039;&#x2039;</button>

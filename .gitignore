@@ -23,3 +23,6 @@ target
 # Build output
 dist
 node_modules
+
+# Claude Code worktrees
+.claude/worktrees

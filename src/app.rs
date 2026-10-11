@@ -1,6 +1,6 @@
 //! Browser front end: wires the DOM to the reader state machine.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,7 @@ use crate::fetch;
 use crate::input::{classify, Input};
 use crate::resume::{self, PauseKind};
 use crate::settings::Settings;
-use crate::text::{self, Boundary, Document as Doc, Style};
+use crate::text::{self, Boundary, Document as Doc, ListBlock, Style};
 use crate::timing::{self, Pacing};
 
 const SETTINGS_KEY: &str = "sicr.settings";
@@ -66,6 +66,7 @@ struct Els {
     progress_text: HtmlElement,
     time_left: HtmlElement,
     stage: HtmlElement,
+    map: HtmlElement,
     word: HtmlElement,
     word_before: HtmlElement,
     word_pivot: HtmlElement,
@@ -73,6 +74,7 @@ struct Els {
     context: HtmlElement,
     hint: HtmlElement,
     scrub: HtmlInputElement,
+    landmarks: HtmlElement,
     restart_btn: HtmlElement,
     prev_sent_btn: HtmlElement,
     prev_word_btn: HtmlElement,
@@ -133,7 +135,20 @@ struct App {
     swipe_start: Option<(f64, f64, f64)>,
     /// A swipe just ended; ignore the click the browser may send after it.
     swallow_click_until: f64,
+    /// Heading ticks on the scrub track, by section index, so the current one can be lit.
+    ticks: Vec<(usize, Element)>,
+    /// A finger or mouse button is down on the scrub track.
+    scrub_pointer: bool,
+    /// Indices into `doc.sections` shown as outline rows, in order; the title heading is left out.
+    map_rows: Vec<usize>,
+    /// The section lit in the outline at the last render, so it scrolls only when that changes.
+    map_now: Cell<Option<usize>>,
 }
+
+/// Dragging the scrub this close to a heading (in words, or in pixels of track) lands on it.
+const SNAP_MIN_RADIUS: usize = 3;
+const SNAP_RADIUS_DIV: usize = 150;
+const SNAP_MIN_PX: f64 = 6.0;
 
 pub fn run() -> Result<(), JsValue> {
     let window = web_sys::window().ok_or("no window")?;
@@ -171,6 +186,10 @@ pub fn run() -> Result<(), JsValue> {
         gated: false,
         swipe_start: None,
         swallow_click_until: 0.0,
+        ticks: Vec::new(),
+        scrub_pointer: false,
+        map_rows: Vec::new(),
+        map_now: Cell::new(None),
     }));
 
     install_timers(&app);
@@ -220,6 +239,7 @@ impl Els {
             progress_text: get(document, "progress-text")?,
             time_left: get(document, "time-left")?,
             stage: get(document, "stage")?,
+            map: get(document, "map")?,
             word: get(document, "word")?,
             word_before: get(document, "word-before")?,
             word_pivot: get(document, "word-pivot")?,
@@ -227,6 +247,7 @@ impl Els {
             context: get(document, "context")?,
             hint: get(document, "hint")?,
             scrub: get(document, "scrub")?,
+            landmarks: get(document, "landmarks")?,
             restart_btn: get(document, "restart-btn")?,
             prev_sent_btn: get(document, "prev-sent-btn")?,
             prev_word_btn: get(document, "prev-word-btn")?,
@@ -360,6 +381,9 @@ impl App {
         set_range_fill(&self.els.wpm);
         self.save_settings();
         self.render_meta();
+        if !self.playing && !self.gated {
+            self.render_map();
+        }
     }
 
     fn read_settings_from_ui(&mut self) {
@@ -388,6 +412,7 @@ impl App {
         self.clear_timer();
         self.loading = false;
         self.doc = doc;
+        self.map_rows = self.doc.outline().collect();
         if let Some(title) = self.title_override.take() {
             self.doc.title = Some(title);
         }
@@ -409,8 +434,10 @@ impl App {
         self.els
             .scrub
             .set_max(&self.doc.tokens.len().saturating_sub(1).to_string());
+        self.build_landmarks();
         self.els.home.set_hidden(true);
         self.els.reader.set_hidden(false);
+        self.build_map();
         let _ = self.els.stage.focus();
         self.render();
     }
@@ -540,6 +567,85 @@ impl App {
         self.schedule(ms);
     }
 
+    /// Lay the document's shape over the scrub track: a tick per heading, a dash per block.
+    fn build_landmarks(&mut self) {
+        self.els.landmarks.set_inner_html("");
+        self.ticks.clear();
+        let n = self.doc.tokens.len();
+        if n < 2 {
+            return;
+        }
+        // The same mapping as the progress fill, so the fill head lands on a tick at a heading.
+        let x = |i: usize| i as f64 / (n - 1) as f64 * 100.0;
+        // The title heading needs no tick.
+        let outline = self.doc.outline();
+        for (k, s) in self.doc.sections.iter().enumerate().skip(outline.start) {
+            if let Ok(el) = self.document.create_element("i") {
+                let _ = el.set_attribute("data-s", &k.to_string());
+                let _ = el.set_attribute("style", &format!("--x:{:.3}%", x(s.start)));
+                if s.level <= 2 {
+                    el.set_class_name("lvl1");
+                }
+                let _ = self.els.landmarks.append_child(&el);
+                self.ticks.push((k, el));
+            }
+        }
+        for b in &self.doc.blocks {
+            if let Ok(el) = self.document.create_element("b") {
+                let (x0, x1) = (x(b.start), x(b.end - 1));
+                let _ = el.set_attribute("style", &format!("--x:{x0:.3}%; --w:{:.3}%", x1 - x0));
+                let _ = self.els.landmarks.append_child(&el);
+            }
+        }
+    }
+
+    /// Scrub input: a drag that ends near a heading lands on it. Keyboard steps of one
+    /// word never snap; a finger on the track always feels the magnet.
+    fn scrub_to(&mut self, i: usize) {
+        let step = i.abs_diff(self.idx) == 1 && !self.scrub_pointer;
+        let (target, text, snap) = self.landmark_at(i, !step);
+        self.seek(target);
+        if let Some(text) = text {
+            self.show_hint(&text);
+        }
+        toggle_class(&self.els.hint, "snap", snap);
+    }
+
+    /// Where a scrub to `i` lands, what the hint says there and whether it is a snap.
+    fn landmark_at(&self, i: usize, magnet: bool) -> (usize, Option<String>, bool) {
+        let n = self.doc.tokens.len();
+        // At least a few words, and at least a few pixels of track on a long document.
+        let width = self.els.scrub.client_width().max(1) as f64;
+        let px_radius = (SNAP_MIN_PX * n.saturating_sub(1) as f64 / width).ceil() as usize;
+        let radius = (n / SNAP_RADIUS_DIV).max(SNAP_MIN_RADIUS).max(px_radius);
+        // Only outline headings are magnets, and the two ends of the track always reach the
+        // first and last word.
+        let outline = self.doc.outline();
+        let near = if magnet && i != 0 && i + 1 != n {
+            self.doc.nearest_section_in(outline.clone(), i, radius)
+        } else {
+            None
+        };
+        match near {
+            Some(k) => {
+                let s = &self.doc.sections[k];
+                // Numbered after the title, so the first real heading is 01.
+                let number = k + 1 - outline.start;
+                let text = format!("{number:02} \u{00B7} {}", s.title.to_uppercase());
+                (s.start, Some(text), true)
+            }
+            None => {
+                // The title is not a section, so a title-only document stays quiet.
+                let text = self
+                    .doc
+                    .section_at(i)
+                    .filter(|k| outline.contains(k))
+                    .map(|k| self.doc.sections[k].title.to_uppercase());
+                (i, text, false)
+            }
+        }
+    }
+
     fn seek(&mut self, idx: usize) {
         if self.doc.tokens.is_empty() {
             return;
@@ -648,6 +754,8 @@ impl App {
 
     fn show_hint(&mut self, text: &str) {
         self.els.hint.set_text_content(Some(text));
+        // Plain hints are dim; a scrub that snaps to a heading brightens its own afterwards.
+        toggle_class(&self.els.hint, "snap", false);
         let _ = self.els.stage.class_list().add_1("show-hint");
         if let Some(h) = self.hint_timer.take() {
             self.window.clear_timeout_with_handle(h);
@@ -720,6 +828,10 @@ impl App {
         );
         self.els.scrub.set_value(&self.idx.to_string());
         set_range_fill(&self.els.scrub);
+        let section = self.doc.section_at(self.idx);
+        for (k, tick) in &self.ticks {
+            toggle_class(tick, "now", Some(*k) == section);
+        }
         let progress = if self.doc.tokens.len() > 1 {
             self.idx as f64 / (self.doc.tokens.len() - 1) as f64
         } else {
@@ -735,6 +847,106 @@ impl App {
             self.els.context.set_text_content(None);
         } else {
             self.render_context();
+        }
+        // The outline only matters while the reader is stopped by choice (or done).
+        if !self.playing && !self.gated {
+            self.render_map();
+        }
+    }
+
+    /// Fill the outline with one row per section, numbered for the digit keys.
+    fn build_map(&self) {
+        let map = &self.els.map;
+        map.set_inner_html("");
+        for (n, &i) in self.map_rows.iter().enumerate() {
+            let s = &self.doc.sections[i];
+            let (Ok(li), Ok(idx), Ok(name), Ok(time)) = (
+                self.document.create_element("li"),
+                self.document.create_element("span"),
+                self.document.create_element("span"),
+                self.document.create_element("span"),
+            ) else {
+                continue;
+            };
+            let _ = li.set_attribute("data-i", &i.to_string());
+            let _ = li.set_attribute("data-start", &s.start.to_string());
+            let _ = li.set_attribute("style", &format!("--level:{}", s.level));
+            idx.set_class_name("idx");
+            idx.set_text_content(Some(&format!("{:02}", n + 1)));
+            name.set_class_name("name");
+            name.set_text_content(Some(&s.title));
+            time.set_class_name("time");
+            let _ = li.append_child(&idx);
+            let _ = li.append_child(&name);
+            let _ = li.append_child(&time);
+            let _ = map.append_child(&li);
+        }
+        self.map_now.set(None);
+        map.set_hidden(self.map_rows.is_empty());
+    }
+
+    /// Mark the current section, fill each row's hairline and show the time still to read.
+    fn render_map(&self) {
+        if self.map_rows.is_empty() {
+            return;
+        }
+        let map = &self.els.map;
+        let rows = map.children();
+        let pacing = self.pacing();
+        // Once the document is done, every row reads as finished.
+        let current = if self.finished {
+            None
+        } else {
+            self.doc.section_at(self.idx)
+        };
+        let mut now: Option<HtmlElement> = None;
+        for (n, &i) in self.map_rows.iter().enumerate() {
+            let Some(li) = rows.item(n as u32).and_then(|e| e.dyn_into::<HtmlElement>().ok()) else {
+                continue;
+            };
+            let (start, end) = self.doc.section_range(i);
+            let is_now = current == Some(i);
+            let (fill, time) = if self.finished || self.idx >= end {
+                (1.0, String::new())
+            } else if is_now {
+                (
+                    (self.idx - start + 1) as f64 / (end - start).max(1) as f64,
+                    timing::format_clock(timing::total_ms(&self.doc.tokens[self.idx + 1..end], &pacing)),
+                )
+            } else {
+                (
+                    0.0,
+                    timing::format_clock(timing::total_ms(&self.doc.tokens[start..end], &pacing)),
+                )
+            };
+            toggle_class(&li, "now", is_now);
+            let _ = li.style().set_property("--fill", &format!("{fill:.4}"));
+            if let Ok(Some(t)) = li.query_selector(".time") {
+                t.set_text_content(Some(&time));
+            }
+            if is_now {
+                now = Some(li);
+            }
+        }
+        // A long outline scrolls; when the current row changes keep it about a third of the way
+        // down, and otherwise leave the reader's own scrolling alone.
+        if self.map_now.replace(current) != current {
+            if let Some(li) = now {
+                let top = li.offset_top() - map.client_height() / 3;
+                map.set_scroll_top(top.max(0));
+            }
+        }
+    }
+
+    /// Jump to the start of the nth outline row (0-based), if there is one.
+    fn jump_to_row(&mut self, n: usize) -> bool {
+        match self.map_rows.get(n) {
+            Some(&i) => {
+                let start = self.doc.sections[i].start;
+                self.seek(start);
+                true
+            }
+            None => false,
         }
     }
 
@@ -800,6 +1012,15 @@ impl App {
             let meant = resume::reaction_sentence(&self.doc, self.idx, &|i| self.word_ms_at(i));
             meant < current
         };
+        // Paused inside a list (or held there by study mode), the whole list is stacked so the
+        // items read as parallel, not as one run-on sentence. A late tap keeps the sentence path
+        // so the text resume will replay stays in view; replays keep it too.
+        if !self.playing && !late {
+            if let Some(list) = self.doc.list_at(self.idx) {
+                self.render_list(ctx, list);
+                return;
+            }
+        }
         let (start, end) = if late {
             (self.doc.sentence_start(current - 1), self.idx + 1)
         } else {
@@ -807,18 +1028,7 @@ impl App {
         };
         let mut marked: Option<Element> = None;
         for i in start..end {
-            let t = &self.doc.tokens[i];
-            // Pieces of a split word are shown joined, without the split hyphen.
-            let piece = if t.glue {
-                t.text.trim_end_matches('-')
-            } else {
-                t.text.as_str()
-            };
-            let text = if i + 1 < end && !t.glue {
-                format!("{piece} ")
-            } else {
-                piece.to_string()
-            };
+            let text = self.context_piece(i, i + 1 == end);
             if i == self.idx {
                 if let Ok(mark) = self.document.create_element("mark") {
                     mark.set_text_content(Some(&text));
@@ -839,11 +1049,104 @@ impl App {
                 let _ = ctx.append_child(&node);
             }
         }
-        // Long sentences scroll; keep the marked word about a third of the way down.
+        self.scroll_mark_into_view(ctx, marked);
+    }
+
+    /// Text of token `i` for the context box: pieces of a split word are shown joined,
+    /// without the split hyphen, and a space follows every whole word but the last.
+    fn context_piece(&self, i: usize, last: bool) -> String {
+        let t = &self.doc.tokens[i];
+        let piece = if t.glue {
+            t.text.trim_end_matches('-')
+        } else {
+            t.text.as_str()
+        };
+        if last || t.glue {
+            piece.to_string()
+        } else {
+            format!("{piece} ")
+        }
+    }
+
+    /// Long context scrolls; keep the marked word about a third of the way down.
+    fn scroll_mark_into_view(&self, ctx: &HtmlElement, marked: Option<Element>) {
         if let Some(mark) = marked.and_then(|m| m.dyn_into::<HtmlElement>().ok()) {
             let top = mark.offset_top() - ctx.client_height() / 3;
             ctx.set_scroll_top(top.max(0));
         }
+    }
+
+    /// The whole list stacked under the word: an optional intro line, then one row per
+    /// item with a mono marker column and the item text, the current item lit and the
+    /// current word marked. Rows carry `data-idx` so a tap can seek to them.
+    fn render_list(&self, ctx: &HtmlElement, list: &ListBlock) {
+        let current = list.item_at(self.idx);
+        if let Some((s, e)) = self.doc.list_intro(list) {
+            if let Ok(intro) = self.document.create_element("span") {
+                intro.set_class_name("intro");
+                let text: String = (s..e).map(|i| self.context_piece(i, i + 1 == e)).collect();
+                intro.set_text_content(Some(&text));
+                let _ = ctx.append_child(&intro);
+            }
+        }
+        let Ok(stack) = self.document.create_element("div") else {
+            return;
+        };
+        stack.set_class_name("list");
+        let mut marked: Option<Element> = None;
+        for (n, item) in list.items.iter().enumerate() {
+            let (Ok(row), Ok(marker), Ok(text)) = (
+                self.document.create_element("div"),
+                self.document.create_element("span"),
+                self.document.create_element("span"),
+            ) else {
+                continue;
+            };
+            row.set_class_name(if current == Some(n) { "item on" } else { "item" });
+            let _ = row.set_attribute("data-idx", &item.start.to_string());
+            let _ = row.set_attribute("style", &format!("--depth:{}", item.depth.min(2)));
+            marker.set_class_name("marker");
+            let glyph = match (item.task, item.ordered) {
+                (Some(true), _) => "[x]".to_string(),
+                (Some(false), _) => "[ ]".to_string(),
+                (None, true) => format!("{}.", item.number),
+                (None, false) => "\u{2013}".to_string(),
+            };
+            marker.set_text_content(Some(&glyph));
+            text.set_class_name("text");
+            // A parent item's own words: its range minus any nested item inside it.
+            let own: Vec<usize> = (item.start..item.end)
+                .filter(|&i| {
+                    !list
+                        .items
+                        .iter()
+                        .any(|c| c.depth > item.depth && c.start <= i && i < c.end)
+                })
+                .collect();
+            for (k, &i) in own.iter().enumerate() {
+                let piece = self.context_piece(i, k + 1 == own.len());
+                if i == self.idx {
+                    if let Ok(mark) = self.document.create_element("mark") {
+                        mark.set_text_content(Some(&piece));
+                        let _ = text.append_child(&mark);
+                        marked = Some(mark);
+                    }
+                } else {
+                    let _ = text.append_child(&self.document.create_text_node(&piece));
+                }
+            }
+            let _ = row.append_child(&marker);
+            let _ = row.append_child(&text);
+            let _ = stack.append_child(&row);
+        }
+        let _ = ctx.append_child(&stack);
+        self.scroll_mark_into_view(ctx, marked);
+    }
+
+    /// Start index of the list item the reader is on, when inside a list.
+    fn current_item_start(&self) -> Option<usize> {
+        let list = self.doc.list_at(self.idx)?;
+        list.item_at(self.idx).map(|n| list.items[n].start)
     }
 
     fn set_status(&self, msg: &str, is_error: bool) {
@@ -1159,12 +1462,45 @@ fn wire_events(app: &Shared) {
     }
     {
         let app = app.clone();
-        on(&els.stage, "click", move |_| {
+        on(&els.stage, "click", move |e| {
             let mut a = app.borrow_mut();
             if js_sys::Date::now() < a.swallow_click_until {
                 return;
             }
+            // A tap on another row of a paused list stack moves there without playing.
+            let tapped = e
+                .target()
+                .and_then(|t| t.dyn_into::<Element>().ok())
+                .and_then(|el| el.closest("[data-idx]").ok().flatten())
+                .and_then(|row| row.get_attribute("data-idx"))
+                .and_then(|s| s.parse::<usize>().ok());
+            if let Some(start) = tapped {
+                if a.current_item_start() != Some(start) {
+                    a.seek(start);
+                    return;
+                }
+            }
             a.toggle();
+        });
+    }
+    {
+        // A tap on an outline row jumps there and must not reach the stage's play/pause toggle.
+        let app = app.clone();
+        on(&els.map, "click", move |e| {
+            e.stop_propagation();
+            // A swipe that ends over the outline is still a swipe, not a tap on a row.
+            if js_sys::Date::now() < app.borrow().swallow_click_until {
+                return;
+            }
+            let start = e
+                .target()
+                .and_then(|t| t.dyn_into::<Element>().ok())
+                .and_then(|el| el.closest("[data-start]").ok().flatten())
+                .and_then(|row| row.get_attribute("data-start"))
+                .and_then(|s| s.parse::<usize>().ok());
+            if let Some(start) = start {
+                app.borrow_mut().seek(start);
+            }
         });
     }
     {
@@ -1261,7 +1597,44 @@ fn wire_events(app: &Shared) {
             let mut a = app.borrow_mut();
             let i = a.els.scrub.value().parse::<usize>().unwrap_or(0);
             a.pause();
-            a.seek(i);
+            a.scrub_to(i);
+        });
+    }
+    {
+        let app = app.clone();
+        on(&els.scrub, "pointerdown", move |_| {
+            app.borrow_mut().scrub_pointer = true;
+        });
+    }
+    for event in ["pointerup", "pointercancel"] {
+        let app = app.clone();
+        on(&a.window, event, move |_| {
+            app.borrow_mut().scrub_pointer = false;
+        });
+    }
+    {
+        // Hovering the track names the section under the pointer without moving.
+        let app = app.clone();
+        on(&els.scrub, "pointermove", move |e| {
+            let Some(pe) = e.dyn_ref::<PointerEvent>() else {
+                return;
+            };
+            if pe.buttons() != 0 || pe.pointer_type() != "mouse" {
+                return;
+            }
+            let mut a = app.borrow_mut();
+            let n = a.doc.tokens.len();
+            let width = a.els.scrub.client_width();
+            if n < 2 || width <= 0 {
+                return;
+            }
+            let frac = (pe.offset_x() as f64 / width as f64).clamp(0.0, 1.0);
+            let i = (frac * (n - 1) as f64).round() as usize;
+            let (_, text, snap) = a.landmark_at(i, true);
+            if let Some(text) = text {
+                a.show_hint(&text);
+            }
+            toggle_class(&a.els.hint, "snap", snap);
         });
     }
     {
@@ -1408,6 +1781,11 @@ fn handle_key(app: &Shared, ke: &KeyboardEvent) {
         "Escape" => {
             a.go_home();
             true
+        }
+        // The outline's row numbers double as its key legend.
+        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" if !a.playing && !a.gated => {
+            let n = key.as_bytes()[0] - b'1';
+            a.jump_to_row(n as usize)
         }
         _ => false,
     };
