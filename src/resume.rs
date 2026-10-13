@@ -23,6 +23,12 @@ const LONG_AWAY_MS: f64 = 15.0 * 60_000.0;
 const SENTENCE_WINDOW: usize = 8;
 const MIN_REWIND: usize = 3;
 
+/// A pause this short leaves the reader in the flow of the text; a longer one, or coming
+/// back to a saved read, starts as cold as a fresh read.
+pub fn still_warm(away_ms: f64) -> bool {
+    away_ms < MEDIUM_AWAY_MS
+}
+
 /// Start of the sentence the reader most likely meant when reacting at `idx`.
 /// `word_ms(i)` is the on-screen time of token `i` without its boundary pause.
 pub fn reaction_sentence(doc: &Document, idx: usize, word_ms: &dyn Fn(usize) -> f64) -> usize {

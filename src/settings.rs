@@ -22,6 +22,8 @@ pub struct Settings {
     pub word_font: String,
     /// Study mode: hold at every sentence end until the reader taps.
     pub study_mode: bool,
+    /// Words over which playback eases up to the set speed from a start; 0 turns it off.
+    pub ramp_words: u32,
 }
 
 /// (setting key, CSS family stack, family name to wait for before the first flash)
@@ -52,6 +54,7 @@ impl Default for Settings {
             proxy: DEFAULT_PROXY.into(),
             word_font: WORD_FONTS[0].0.into(),
             study_mode: false,
+            ramp_words: 20,
         }
     }
 }
@@ -60,6 +63,7 @@ impl Settings {
     pub const MIN_WPM: u32 = 60;
     pub const MAX_WPM: u32 = 1500;
     pub const WPM_STEP: u32 = 10;
+    pub const MAX_RAMP_WORDS: u32 = 60;
 
     /// CSS `font-family` value for the flashed word.
     pub fn word_font_stack(&self) -> &'static str {
@@ -92,6 +96,7 @@ impl Settings {
         self.wpm = self.wpm.clamp(Self::MIN_WPM, Self::MAX_WPM);
         self.pause_scale = self.pause_scale.clamp(0.0, 2.0);
         self.font_size = self.font_size.clamp(1.5, 6.0);
+        self.ramp_words = self.ramp_words.min(Self::MAX_RAMP_WORDS);
         if !matches!(self.theme.as_str(), "auto" | "dark" | "light") {
             self.theme = "auto".into();
         }
@@ -129,6 +134,13 @@ mod tests {
         let s = Settings::from_json("{\"theme\":\"dark\"}");
         assert_eq!(s.theme, "dark");
         assert_eq!(s.wpm, 300);
+        assert_eq!(s.ramp_words, 20);
+    }
+
+    #[test]
+    fn ramp_is_capped_and_can_be_off() {
+        assert_eq!(Settings::from_json("{\"ramp_words\": 999}").ramp_words, 60);
+        assert_eq!(Settings::from_json("{\"ramp_words\": 0}").ramp_words, 0);
     }
 
     #[test]
