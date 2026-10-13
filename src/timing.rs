@@ -126,6 +126,26 @@ pub fn total_ms(tokens: &[Token], pacing: &Pacing) -> f64 {
     tokens.iter().map(|t| duration_ms(t, pacing)).sum()
 }
 
+/// Speed at the start of a ramp, as a fraction of the target.
+pub const RAMP_START: f64 = 0.55;
+
+/// Duration multiplier for word `i` (0-based) of a ramp `len` words long. Playback starts
+/// at `RAMP_START` of the set speed and eases up to it along a smoothstep, so the first
+/// word stays up longest and the last word of the ramp is nearly at speed; 1.0 past it.
+pub fn ramp_multiplier(i: usize, len: usize) -> f64 {
+    if len == 0 || i >= len {
+        return 1.0;
+    }
+    let t = (i as f64 + 1.0) / (len as f64 + 1.0);
+    let eased = t * t * (3.0 - 2.0 * t);
+    1.0 / (RAMP_START + (1.0 - RAMP_START) * eased)
+}
+
+/// The speed word `i` of a ramp is actually shown at, for the dock's readout.
+pub fn ramp_wpm(wpm: u32, i: usize, len: usize) -> u32 {
+    (wpm as f64 / ramp_multiplier(i, len)).round() as u32
+}
+
 /// Format milliseconds as "m:ss" (or "h:mm:ss" for long reads).
 pub fn format_clock(ms: f64) -> String {
     let secs = (ms / 1000.0).round().max(0.0) as u64;
@@ -218,5 +238,27 @@ mod tests {
         assert_eq!(format_clock(0.0), "00:00");
         assert_eq!(format_clock(61_000.0), "01:01");
         assert_eq!(format_clock(3_600_000.0 + 5_000.0), "1:00:05");
+    }
+
+    #[test]
+    fn ramp_eases_from_slow_to_full_speed() {
+        let len = 20;
+        let mults: Vec<f64> = (0..len).map(|i| ramp_multiplier(i, len)).collect();
+        // Starts close to the ramp floor, slows nothing past the end, and never speeds up
+        // again in between.
+        assert!((mults[0] - 1.0 / RAMP_START).abs() < 0.03, "{}", mults[0]);
+        assert!(
+            mults[len - 1] > 1.0 && mults[len - 1] < 1.01,
+            "{}",
+            mults[len - 1]
+        );
+        assert!(mults.windows(2).all(|w| w[0] > w[1]));
+        assert_eq!(ramp_multiplier(len, len), 1.0);
+        assert_eq!(ramp_multiplier(5, 0), 1.0);
+        // The middle of the ramp sits between the two speeds.
+        let mid = ramp_wpm(300, 9, len);
+        assert!(mid > 200 && mid < 260, "{mid}");
+        assert_eq!(ramp_wpm(300, 0, 0), 300);
+        assert!(ramp_wpm(300, 0, len) < 170);
     }
 }

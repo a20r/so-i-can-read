@@ -27,8 +27,6 @@ const START_DELAY_MS: f64 = 400.0;
 /// Replays requested this close together step back one more sentence each, up to a limit.
 const ECHO_STACK_MS: f64 = 1500.0;
 const ECHO_STACK_MAX: u8 = 3;
-/// Words after a resume shown a little longer while the eye settles.
-const WARMUP: [f64; 3] = [1.5, 1.25, 1.1];
 /// A horizontal drag at least this long, and mostly horizontal, is a swipe.
 const SWIPE_MIN_PX: f64 = 40.0;
 const SWIPE_MAX_MS: f64 = 600.0;
@@ -53,6 +51,8 @@ struct Els {
     wpm_home_val: HtmlElement,
     pause_scale: HtmlInputElement,
     pause_val: HtmlElement,
+    ramp_words: HtmlInputElement,
+    ramp_val: HtmlElement,
     font_size: HtmlInputElement,
     font_val: HtmlElement,
     theme: HtmlSelectElement,
@@ -122,8 +122,9 @@ struct App {
     pause_kind: PauseKind,
     /// The reader moved the position while paused, so resume starts exactly there.
     moved_while_paused: bool,
-    /// Words left in the post-resume warm-up.
-    warmup: usize,
+    /// Position in, and length of, the speed ramp that eases playback up to the set speed.
+    ramp_pos: usize,
+    ramp_len: usize,
     /// Furthest word reached before a replay; the replayed text shows until it is passed.
     replay_mark: Option<usize>,
     echo_stack: u8,
@@ -178,7 +179,8 @@ pub fn run() -> Result<(), JsValue> {
         paused_at: None,
         pause_kind: PauseKind::User,
         moved_while_paused: false,
-        warmup: 0,
+        ramp_pos: 0,
+        ramp_len: 0,
         replay_mark: None,
         echo_stack: 0,
         last_echo_at: 0.0,
@@ -226,6 +228,8 @@ impl Els {
             wpm_home_val: get(document, "wpm-home-val")?,
             pause_scale: get(document, "pause-scale")?,
             pause_val: get(document, "pause-val")?,
+            ramp_words: get(document, "ramp-words")?,
+            ramp_val: get(document, "ramp-val")?,
             font_size: get(document, "font-size")?,
             font_val: get(document, "font-val")?,
             theme: get(document, "theme")?,
@@ -331,6 +335,11 @@ impl App {
         self.els
             .pause_val
             .set_text_content(Some(&format!("{:.1}", s.pause_scale)));
+        self.els.ramp_words.set_value(&s.ramp_words.to_string());
+        self.els.ramp_val.set_text_content(Some(&match s.ramp_words {
+            0 => "off".to_string(),
+            n => format!("{n} words"),
+        }));
         self.els.font_size.set_value(&format!("{}", s.font_size));
         self.els
             .font_val
@@ -345,6 +354,7 @@ impl App {
             &self.els.wpm_home,
             &self.els.wpm,
             &self.els.pause_scale,
+            &self.els.ramp_words,
             &self.els.font_size,
         ] {
             set_range_fill(r);
@@ -390,6 +400,7 @@ impl App {
         let s = &mut self.settings;
         s.wpm = self.els.wpm_home.value().parse().unwrap_or(s.wpm);
         s.pause_scale = self.els.pause_scale.value().parse().unwrap_or(s.pause_scale);
+        s.ramp_words = self.els.ramp_words.value().parse().unwrap_or(s.ramp_words);
         s.font_size = self.els.font_size.value().parse().unwrap_or(s.font_size);
         s.theme = self.els.theme.value();
         s.word_font = self.els.word_font.value();
@@ -459,6 +470,10 @@ impl App {
             return;
         }
         let mut rewound = 0;
+        // Picking up where the reader paused, or replaying, needs less of a run-up than a
+        // fresh start or a new spot.
+        let resumed = (!self.finished && self.paused_at.is_some() && !self.moved_while_paused)
+            || self.replay_mark.is_some();
         if self.finished {
             self.finished = false;
             self.idx = 0;
@@ -479,7 +494,7 @@ impl App {
         }
         self.paused_at = None;
         self.moved_while_paused = false;
-        self.warmup = WARMUP.len();
+        self.start_ramp(resumed);
         self.playing = true;
         self.words_read += 1;
         self.render();
@@ -490,6 +505,14 @@ impl App {
         }
         let ms = START_DELAY_MS + self.current_duration();
         self.schedule(ms);
+    }
+
+    /// Start easing up to the set speed: the full ramp from a fresh start or a new spot, a
+    /// third of it when picking up where the reader paused.
+    fn start_ramp(&mut self, short: bool) {
+        let full = self.settings.ramp_words as usize;
+        self.ramp_len = if short { full.div_ceil(3) } else { full };
+        self.ramp_pos = 0;
     }
 
     fn pause(&mut self) {
@@ -537,7 +560,7 @@ impl App {
         }
         self.idx += 1;
         self.words_read += 1;
-        self.warmup = self.warmup.saturating_sub(1);
+        self.ramp_pos += 1;
         if self.replay_mark.is_some_and(|m| self.idx > m) {
             self.replay_mark = None;
         }
@@ -696,6 +719,8 @@ impl App {
             self.finished = false;
             self.idx = target;
             self.paused_at = None;
+            // Set before play so the ramp treats this as a replay, not a fresh start.
+            self.replay_mark = Some(mark);
             self.play();
         }
         self.replay_mark = Some(mark);
@@ -724,12 +749,9 @@ impl App {
             return 0.0;
         };
         let pacing = self.pacing();
-        // The first words after a resume stay up a little longer while the eye settles.
-        let warm = match self.warmup {
-            0 => 1.0,
-            n => WARMUP[WARMUP.len() - n],
-        };
-        timing::word_ms(t, &pacing) * warm + timing::hold_ms(t, &pacing)
+        // The ramp stretches the word itself; the pauses already have floors of their own.
+        let ramp = timing::ramp_multiplier(self.ramp_pos, self.ramp_len);
+        timing::word_ms(t, &pacing) * ramp + timing::hold_ms(t, &pacing)
     }
 
     fn schedule(&mut self, ms: f64) {
@@ -819,6 +841,15 @@ impl App {
             .play_btn
             .set_attribute("aria-label", if self.playing { "Pause" } else { "Play" })
             .ok();
+        // While easing up to speed, the dock shows the speed the words are actually at.
+        let ramping = self.playing && self.ramp_pos < self.ramp_len;
+        let shown = if ramping {
+            timing::ramp_wpm(self.settings.wpm, self.ramp_pos, self.ramp_len)
+        } else {
+            self.settings.wpm
+        };
+        self.els.wpm_val.set_text_content(Some(&shown.to_string()));
+        toggle_class(&self.els.wpm_val, "ramping", ramping);
         toggle_class(&self.els.stage, "paused", !self.playing && !self.gated);
         toggle_class(&self.els.stage, "gated", self.gated);
         toggle_class(
@@ -1428,8 +1459,9 @@ fn wire_events(app: &Shared) {
             let _ = a.els.input.focus();
         });
     }
-    let setting_inputs: [&web_sys::EventTarget; 7] = [
+    let setting_inputs: [&web_sys::EventTarget; 8] = [
         &els.pause_scale,
+        &els.ramp_words,
         &els.font_size,
         &els.theme,
         &els.word_font,

@@ -833,6 +833,9 @@ button.play:active { background: transparent; color: var(--accent); }
 
 .speed { display: flex; align-items: center; gap: 0.6rem; padding: 0 0.1rem; }
 .speed input[type="range"] { flex: 1; }
+/* While playback eases up to speed, the readout counts up in the dim colour. */
+.wpm-label output { transition: color 0.3s ease; }
+.wpm-label output.ramping { color: var(--fg-3); }
 .wpm-label {
   display: inline-flex;
   align-items: baseline;
